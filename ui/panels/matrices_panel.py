@@ -1,6 +1,8 @@
 from PyQt5 import QtWidgets, QtGui, QtCore
 import numpy as np
 
+from core.torotron_dh import resolve_torotron_dh, compute_forward_kinematics, compute_joint_matrix
+
 class MatricesPanel(QtWidgets.QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -166,7 +168,66 @@ class MatricesPanel(QtWidgets.QWidget):
             data['spin'].blockSignals(True)
             data['spin'].setValue(value)
             data['spin'].blockSignals(False)
-            self.update_display()
+        # Always refresh matrices, including updates coming from slave/coupled joints.
+        self.update_display()
+
+    def _is_slave_joint(self, joint_id):
+        for _, slaves in self.mw.robot.joint_relations.items():
+            if any(s_id == joint_id for s_id, _ in slaves):
+                return True
+        return False
+
+    def _display_value(self, value):
+        # Clamp tiny floating artifacts such as 6.123e-17 for cleaner UI output.
+        return 0.0 if abs(value) < 1e-9 else value
+
+    def _clean_display_matrix(self, mat):
+        out = np.array(mat, dtype=float, copy=True)
+        out[np.abs(out) < 1e-9] = 0.0
+        out[3, :] = np.array([0.0, 0.0, 0.0, 1.0])
+        return out
+
+    def _validate_homogeneous_matrix(self, mat):
+        R = mat[:3, :3]
+        is_orthonormal = np.allclose(R.T @ R, np.eye(3), atol=1e-6)
+        det_r = np.linalg.det(R)
+        has_valid_det = abs(det_r - 1.0) <= 1e-6
+        valid_last_row = np.allclose(mat[3, :], np.array([0.0, 0.0, 0.0, 1.0]), atol=1e-9)
+        return is_orthonormal and has_valid_det and valid_last_row, det_r
+
+    def computeJointMatrix(self, theta_deg, d, a, alpha_deg, joint_type="revolute", q_value=0.0):
+        return compute_joint_matrix(theta_deg, d, a, alpha_deg, joint_type, q_value)
+
+    def computeForwardKinematics(self, dh_rows):
+        return compute_forward_kinematics(dh_rows)
+
+    def _joint_meta_by_id(self):
+        meta = {}
+        created_joints = getattr(self.mw.joint_tab, 'joints', {})
+        for child_name, data in created_joints.items():
+            joint_id = data.get('joint_id', child_name)
+            meta[joint_id] = data
+        return meta
+
+    def _ordered_robot_joints(self, robot):
+        roots = [link for link in robot.links.values() if link.parent_joint is None]
+        if robot.base_link and robot.base_link in roots:
+            roots.remove(robot.base_link)
+            roots.insert(0, robot.base_link)
+
+        ordered = []
+        visited_links = set()
+        queue = list(roots)
+        while queue:
+            parent = queue.pop(0)
+            if parent.name in visited_links:
+                continue
+            visited_links.add(parent.name)
+
+            for joint in parent.child_joints:
+                ordered.append(joint)
+                queue.append(joint.child_link)
+        return ordered
 
     def on_spin_move(self, child_name, value, slider):
         slider.blockSignals(True)
@@ -189,11 +250,40 @@ class MatricesPanel(QtWidgets.QWidget):
     def update_display(self):
         self.text_area.clear()
         robot = self.mw.robot
-        created_joints = getattr(self.mw.joint_tab, 'joints', {})
-        
-        if not created_joints:
+        if not robot.joints:
             self.text_area.setHtml("<p style='color:#9e9e9e; font-style:italic; padding: 20px;'>No active joints created yet.</p>")
             return
+
+        joint_meta = self._joint_meta_by_id()
+        ordered_joints = self._ordered_robot_joints(robot)
+
+        dh_rows = []
+        ratio = getattr(self.mw.canvas, "grid_units_per_cm", 1.0)
+        for idx, joint in enumerate(ordered_joints, start=1):
+            joint_id = joint.name
+            meta = joint_meta.get(joint_id, {})
+            inferred = resolve_torotron_dh(joint, meta, ratio)
+
+            current_value = float(meta.get("current_angle", joint.current_value))
+            q_value = current_value if inferred["joint_type"] != "prismatic" else float(meta.get("current_offset", 0.0))
+
+            custom_name = meta.get("custom_name", joint_id)
+            title = f"J{idx} : {custom_name}"
+            if idx == 1:
+                title += " (Base)"
+
+            dh_rows.append({
+                "joint_name": joint_id,
+                "title": title,
+                "joint_type": inferred["joint_type"],
+                "theta0_deg": inferred["theta0_deg"],
+                "d": inferred["d"],
+                "a": inferred["a"],
+                "alpha_deg": inferred["alpha_deg"],
+                "q_value": q_value,
+            })
+
+        fk_results = self.computeForwardKinematics(dh_rows)
 
         html = """
         <style>
@@ -213,6 +303,24 @@ class MatricesPanel(QtWidgets.QWidget):
                 font-weight: 700;
                 padding: 12px 18px;
                 letter-spacing: 1px;
+            }
+            .meta-row {
+                padding: 8px 12px;
+                background-color: #eff6ff;
+                color: #1e3a8a;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 13px;
+                border-bottom: 1px solid #dbeafe;
+            }
+            .sub-head {
+                padding: 8px 12px;
+                background-color: #f8fafc;
+                color: #334155;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 13px;
+                font-weight: 700;
+                border-top: 1px solid #e2e8f0;
+                border-bottom: 1px solid #e2e8f0;
             }
             .matrix-grid {
                 border-collapse: collapse;
@@ -247,42 +355,53 @@ class MatricesPanel(QtWidgets.QWidget):
                 color: #2563eb;
                 font-weight: 800;
             }
+            .warn {
+                color: #b91c1c;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 8px 12px;
+                background: #fef2f2;
+                border-top: 1px solid #fee2e2;
+            }
         </style>
         <div class="container">
         """
-        
-        for child_name, data in created_joints.items():
-            joint_id = data.get('joint_id', child_name)
-            is_slave = False
-            for master, slaves in robot.joint_relations.items():
-                if any(s_id == joint_id for s_id, r in slaves):
-                    is_slave = True
-                    break
-            
-            if is_slave:
-                continue
 
-            custom_name = data.get('custom_name', joint_id)
-            
-            if joint_id in robot.joints:
-                joint = robot.joints[joint_id]
-                rot = joint.get_matrix()
-                if joint.child_link:
-                    offset = joint.child_link.t_offset
-                    t_rel = offset @ rot
-                    
-                    html += f'<div class="matrix-box">'
-                    html += f'  <div class="box-header">{custom_name}</div>'
-                    html += self.format_matrix_html(t_rel)
-                    html += '</div>'
+        for idx, result in enumerate(fk_results, start=1):
+            local_ok, local_det = self._validate_homogeneous_matrix(result["local"])
+            cum_ok, cum_det = self._validate_homogeneous_matrix(result["cumulative"])
+
+            html += f'<div class="matrix-box">'
+            html += f'  <div class="box-header">{result["title"]}</div>'
+            html += (
+                f"<div class='meta-row'>"
+                f"type={result['joint_type']}, "
+                f"theta={self._display_value(result['theta0_deg']):.3f} deg, "
+                f"d={self._display_value(result['d']):.3f}, "
+                f"a={self._display_value(result['a']):.3f}, "
+                f"alpha={self._display_value(result['alpha_deg']):.3f} deg, "
+                f"q={self._display_value(result['q_value']):.3f}"
+                f"</div>"
+            )
+
+            html += "<div class='sub-head'>Local A{}</div>".format(idx)
+            html += self.format_matrix_html(result["local"])
+
+            html += "<div class='sub-head'>Cumulative T0{}</div>".format(idx)
+            html += self.format_matrix_html(result["cumulative"])
+
+            if not local_ok or not cum_ok:
+                html += (
+                    f"<div class='warn'>Validation warning: "
+                    f"det(A{idx}.R)={local_det:.6f}, det(T0{idx}.R)={cum_det:.6f}</div>"
+                )
+            html += '</div>'
         
         html += "</div>"
         self.text_area.setHtml(html)
 
     def format_matrix_html(self, mat):
-        ratio = self.mw.canvas.grid_units_per_cm
-        mat_display = np.copy(mat)
-        mat_display[:3, 3] /= ratio
+        mat_display = self._clean_display_matrix(mat)
         
         col_labels = ['X', 'Y', 'Z', 'T']
         

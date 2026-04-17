@@ -6,7 +6,6 @@ class IKFKPanel(QtWidgets.QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.mw = main_window
-        self.sliders = {}
         self._joint_order = []
         self.init_ui()
 
@@ -57,18 +56,11 @@ class IKFKPanel(QtWidgets.QWidget):
         ik_layout.addLayout(target_row)
 
         solver_row = QtWidgets.QHBoxLayout()
-        self.ik_tolerance = self._make_num_input(1e-6, 1000.0, 0.1, 4)
-        self.ik_iters = QtWidgets.QSpinBox()
-        self.ik_iters.setRange(10, 5000)
-        self.ik_iters.setValue(350)
-        self.ik_iters.setStyleSheet(self._spin_style())
-        solver_row.addWidget(self._labeled_widget("Tolerance", self.ik_tolerance))
-        solver_row.addWidget(self._labeled_widget("Max Iterations", self.ik_iters))
-
-        self.solve_ik_btn = QtWidgets.QPushButton("Solve IK from DH")
+        self.solve_ik_btn = QtWidgets.QPushButton("Solve IK")
         self.solve_ik_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.solve_ik_btn.setStyleSheet(self._primary_btn_style())
         self.solve_ik_btn.clicked.connect(self.solve_ik)
+        solver_row.addStretch()
         solver_row.addWidget(self.solve_ik_btn)
         ik_layout.addLayout(solver_row)
 
@@ -107,8 +99,8 @@ class IKFKPanel(QtWidgets.QWidget):
         tool_row.addStretch()
         fk_layout.addLayout(tool_row)
 
-        self.dh_table = QtWidgets.QTableWidget(0, 5)
-        self.dh_table.setHorizontalHeaderLabels(["Joint", "theta (deg)", "d", "a", "alpha (deg)"])
+        self.dh_table = QtWidgets.QTableWidget(0, 2)
+        self.dh_table.setHorizontalHeaderLabels(["Joint", "theta (deg)"])
         self.dh_table.verticalHeader().setVisible(False)
         self.dh_table.setAlternatingRowColors(True)
         self.dh_table.setStyleSheet(
@@ -132,7 +124,7 @@ class IKFKPanel(QtWidgets.QWidget):
             }
             """
         )
-        self.dh_table.horizontalHeader().setStretchLastSection(True)
+        self.dh_table.horizontalHeader().setStretchLastSection(False)
         self.dh_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
         fk_layout.addWidget(self.dh_table)
 
@@ -153,26 +145,41 @@ class IKFKPanel(QtWidgets.QWidget):
         )
         fk_layout.addWidget(self.result_view)
 
+        dh_mats_row = QtWidgets.QHBoxLayout()
+        dh_mats_label = QtWidgets.QLabel("DH Matrices for Joints")
+        dh_mats_label.setStyleSheet("color: #1976d2; font-size: 17px; font-weight: 700;")
+        dh_mats_row.addWidget(dh_mats_label)
+        dh_mats_row.addStretch()
+
+        self.compute_dh_mats_btn = QtWidgets.QPushButton("Compute DH Matrices")
+        self.compute_dh_mats_btn.setStyleSheet(self._ghost_btn_style())
+        self.compute_dh_mats_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.compute_dh_mats_btn.clicked.connect(self.compute_dh_matrices)
+        dh_mats_row.addWidget(self.compute_dh_mats_btn)
+        fk_layout.addLayout(dh_mats_row)
+
+        self.dh_matrices_view = QtWidgets.QTextEdit()
+        self.dh_matrices_view.setReadOnly(True)
+        self.dh_matrices_view.setMinimumHeight(220)
+        self.dh_matrices_view.setStyleSheet(
+            """
+            QTextEdit {
+                background: #ffffff;
+                color: #0f172a;
+                border: 1px solid #dbe6ee;
+                border-radius: 8px;
+                font-size: 14px;
+                padding: 10px;
+            }
+            """
+        )
+        fk_layout.addWidget(self.dh_matrices_view)
+
         content_layout.addWidget(self.fk_group)
 
-        slider_header = QtWidgets.QLabel("Joint Rotation Controls")
-        slider_header.setStyleSheet("color: #1976d2; font-size: 20px; font-weight: 700; padding: 4px;")
-        root.addWidget(slider_header)
-
-        self.scroll_area = QtWidgets.QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setStyleSheet("background-color: #ffffff; border: 1px solid #dbe6ee; border-radius: 10px;")
-
-        self.slider_container = QtWidgets.QWidget()
-        self.slider_layout = QtWidgets.QVBoxLayout(self.slider_container)
-        self.slider_layout.setAlignment(QtCore.Qt.AlignTop)
-        self.scroll_area.setWidget(self.slider_container)
-
-        root.addWidget(self.scroll_area, 2)
-
         self.rebuild_dh_table()
-        self.refresh_sliders()
         self.update_display()
+        self.compute_dh_matrices()
 
     def _labeled_widget(self, text, widget):
         frame = QtWidgets.QFrame()
@@ -261,12 +268,7 @@ class IKFKPanel(QtWidgets.QWidget):
         prev = {}
         for r in range(self.dh_table.rowCount()):
             j_name = self.dh_table.item(r, 0).text() if self.dh_table.item(r, 0) else f"J{r+1}"
-            prev[j_name] = [
-                self._table_num(r, 1, 0.0),
-                self._table_num(r, 2, 0.0),
-                self._table_num(r, 3, 0.0),
-                self._table_num(r, 4, 0.0),
-            ]
+            prev[j_name] = self._table_num(r, 1, 0.0)
 
         self._joint_order = self._active_joint_child_names()
         if not self._joint_order:
@@ -282,9 +284,8 @@ class IKFKPanel(QtWidgets.QWidget):
             name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemIsEditable)
             self.dh_table.setItem(idx, 0, name_item)
 
-            values = prev.get(display, [0.0, 0.0, 0.0, 0.0])
-            for col, val in enumerate(values, start=1):
-                self.dh_table.setItem(idx, col, QtWidgets.QTableWidgetItem(f"{val:.4f}"))
+            theta = prev.get(display, 0.0)
+            self.dh_table.setItem(idx, 1, QtWidgets.QTableWidgetItem(f"{theta:.4f}"))
 
         self.load_joint_angles_into_dh()
 
@@ -315,10 +316,7 @@ class IKFKPanel(QtWidgets.QWidget):
         rows = []
         for r in range(self.dh_table.rowCount()):
             theta_deg = self._table_num(r, 1, 0.0)
-            d = self._table_num(r, 2, 0.0)
-            a = self._table_num(r, 3, 0.0)
-            alpha_deg = self._table_num(r, 4, 0.0)
-            rows.append((theta_deg, d, a, alpha_deg))
+            rows.append(theta_deg)
         return rows
 
     def _a_matrix(self, theta_rad, d, a, alpha_rad):
@@ -335,12 +333,10 @@ class IKFKPanel(QtWidgets.QWidget):
         )
 
     def _fk_with_thetas_rad(self, thetas_rad):
-        rows = self._dh_rows()
         T = np.eye(4)
         chain = []
-        for i, (_, d, a, alpha_deg) in enumerate(rows):
-            alpha_rad = np.radians(alpha_deg)
-            A = self._a_matrix(thetas_rad[i], d, a, alpha_rad)
+        for theta in thetas_rad:
+            A = self._a_matrix(theta, 0.0, 0.0, 0.0)
             T = T @ A
             chain.append(T.copy())
         return T, chain
@@ -349,9 +345,10 @@ class IKFKPanel(QtWidgets.QWidget):
         rows = self._dh_rows()
         if not rows:
             self.result_view.setHtml("<p style='color:#78909c;'>No DH rows configured.</p>")
+            self.compute_dh_matrices()
             return
 
-        theta_rad = np.array([np.radians(r[0]) for r in rows], dtype=float)
+        theta_rad = np.array([np.radians(theta) for theta in rows], dtype=float)
         T, chain = self._fk_with_thetas_rad(theta_rad)
 
         html = """
@@ -376,6 +373,7 @@ class IKFKPanel(QtWidgets.QWidget):
         )
 
         self.result_view.setHtml(html)
+        self.compute_dh_matrices()
 
     def _matrix_html(self, mat):
         labels = ["X", "Y", "Z", "T"]
@@ -391,6 +389,35 @@ class IKFKPanel(QtWidgets.QWidget):
         s += "</table>"
         return s
 
+    def compute_dh_matrices(self):
+        rows = self._dh_rows()
+        if not rows:
+            self.dh_matrices_view.setHtml("<p style='color:#78909c;'>No joint DH rows configured.</p>")
+            return
+
+        html = """
+        <style>
+            .box { border: 1px solid #dbe6ee; border-radius: 10px; margin: 10px 0; overflow: hidden; }
+            .head { background: #1976d2; color: #fff; font-weight: 700; font-size: 16px; padding: 10px 12px; }
+            .matrix { width: 100%; border-collapse: collapse; }
+            .matrix td, .matrix th { text-align: center; padding: 8px; font-family: Consolas, monospace; font-size: 14px; }
+            .matrix th { background: #f2f7fb; color: #334e68; }
+            .matrix tr:nth-child(even) td { background: #fafcfe; }
+        </style>
+        """
+
+        for idx, theta_deg in enumerate(rows):
+            theta_rad = np.radians(theta_deg)
+            Ai = self._a_matrix(theta_rad, 0.0, 0.0, 0.0)
+
+            joint_name = f"J{idx + 1}"
+            if idx < self.dh_table.rowCount() and self.dh_table.item(idx, 0):
+                joint_name = self.dh_table.item(idx, 0).text()
+
+            html += f"<div class='box'><div class='head'>A{idx+1} ({joint_name})</div>{self._matrix_html(Ai)}</div>"
+
+        self.dh_matrices_view.setHtml(html)
+
     def solve_ik(self):
         rows = self._dh_rows()
         n = len(rows)
@@ -399,10 +426,10 @@ class IKFKPanel(QtWidgets.QWidget):
             return
 
         target = np.array([self.ik_x.value(), self.ik_y.value(), self.ik_z.value()], dtype=float)
-        tol = max(1e-8, self.ik_tolerance.value())
-        max_iters = self.ik_iters.value()
+        tol = 0.1
+        max_iters = 350
 
-        theta = np.array([np.radians(r[0]) for r in rows], dtype=float)
+        theta = np.array([np.radians(v) for v in rows], dtype=float)
         lam = 1e-2
         eps = 1e-5
 
@@ -441,70 +468,9 @@ class IKFKPanel(QtWidgets.QWidget):
         self.mw.log(f"DH IK solve complete ({solved_text}).")
 
     def refresh_sliders(self):
-        while self.slider_layout.count():
-            item = self.slider_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-
-        self.sliders = {}
-
-        joint_tab = getattr(self.mw, "joint_tab", None)
-        joint_data = getattr(joint_tab, "joints", {}) if joint_tab is not None else {}
-        if not joint_data:
-            empty_msg = QtWidgets.QLabel("No joints created yet.")
-            empty_msg.setStyleSheet("color: #90a4ae; font-size: 14px; font-style: italic; padding: 10px;")
-            self.slider_layout.addWidget(empty_msg)
-            return
-
-        for child_name, data in joint_data.items():
-            joint_id = data.get("joint_id", child_name)
-            is_slave = False
-            for _, slaves in self.mw.robot.joint_relations.items():
-                if any(s_id == joint_id for s_id, _ in slaves):
-                    is_slave = True
-                    break
-            if is_slave:
-                continue
-
-            group = QtWidgets.QFrame()
-            group.setStyleSheet("background: #ffffff; border: 1px solid #dbe6ee; border-radius: 8px; margin-bottom: 6px;")
-            glay = QtWidgets.QVBoxLayout(group)
-            glay.setContentsMargins(10, 8, 10, 8)
-
-            custom_name = data.get("custom_name", f"{data['parent']} -> {child_name}")
-            axis_name = ["X", "Y", "Z"][data["axis"]]
-            lbl = QtWidgets.QLabel(f"{custom_name} ({axis_name})")
-            lbl.setStyleSheet("color: #1565c0; font-weight: 700; font-size: 16px;")
-            glay.addWidget(lbl)
-
-            row = QtWidgets.QHBoxLayout()
-            slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            slider.setRange(int(data["min"] * 10), int(data["max"] * 10))
-            slider.setValue(int(data.get("current_angle", 0.0) * 10))
-            slider.setCursor(QtCore.Qt.PointingHandCursor)
-            slider.setStyleSheet(
-                """
-                QSlider::groove:horizontal { height: 8px; background: #f0f4f8; border-radius: 4px; border: 1px solid #d3deea; }
-                QSlider::sub-page:horizontal { background: #90caf9; border-radius: 4px; }
-                QSlider::handle:horizontal { background: white; border: 2px solid #1976d2; width: 16px; height: 16px; margin-top: -5px; margin-bottom: -5px; border-radius: 8px; }
-                """
-            )
-
-            spin = QtWidgets.QDoubleSpinBox()
-            spin.setRange(data["min"], data["max"])
-            spin.setValue(data.get("current_angle", 0.0))
-            spin.setFixedWidth(90)
-            spin.setDecimals(2)
-            spin.setStyleSheet(self._spin_style())
-
-            slider.valueChanged.connect(lambda v, c=child_name, s=spin: self.on_slider_move(c, v / 10.0, s))
-            spin.valueChanged.connect(lambda v, c=child_name, sl=slider: self.on_spin_move(c, v, sl))
-
-            row.addWidget(slider)
-            row.addWidget(spin)
-            glay.addLayout(row)
-            self.slider_layout.addWidget(group)
-            self.sliders[child_name] = {"slider": slider, "spin": spin}
+        # Joint rotation controls were removed from this panel by UI request.
+        # Keep this method for compatibility with existing callers.
+        return
 
     def on_slider_move(self, child_name, value, spinbox):
         spinbox.blockSignals(True)
@@ -529,15 +495,6 @@ class IKFKPanel(QtWidgets.QWidget):
         self.update_display()
 
     def sync_slider(self, child_name, value):
-        if child_name in self.sliders:
-            data = self.sliders[child_name]
-            data["slider"].blockSignals(True)
-            data["slider"].setValue(int(value * 10))
-            data["slider"].blockSignals(False)
-            data["spin"].blockSignals(True)
-            data["spin"].setValue(value)
-            data["spin"].blockSignals(False)
-
         if child_name in self._joint_order:
             row = self._joint_order.index(child_name)
             self.dh_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{value:.4f}"))

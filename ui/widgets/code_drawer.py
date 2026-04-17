@@ -1,4 +1,4 @@
-infrom PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore, QtGui
 import os
 import subprocess
 import threading

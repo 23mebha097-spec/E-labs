@@ -519,6 +519,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         # Wrap right splitter + terminal button in a container
         right_container = QtWidgets.QWidget()
+        right_container.setMinimumWidth(420)
         right_vbox = QtWidgets.QVBoxLayout(right_container)
         right_vbox.setContentsMargins(0, 0, 0, 0)
         right_vbox.setSpacing(0)
@@ -541,6 +542,25 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.canvas.on_drop_callback = self.sync_link_transform
         self.canvas.on_deselect_callback = self.on_deselect
 
+    def _set_main_splitter_layout(self, show_assembly, show_experiment):
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 4:
+            # [assembly, experiment, right(canvas), code_drawer]
+            sizes = [0, 0, 0, 0]
+
+        drawer_size = sizes[3]
+        window_w = max(1000, self.width())
+        min_right = 420
+
+        assembly_w = 350 if show_assembly else 0
+        experiment_w = 430 if show_experiment else 0
+
+        right_w = window_w - assembly_w - experiment_w - drawer_size
+        if right_w < min_right:
+            right_w = min_right
+
+        self.main_splitter.setSizes([assembly_w, experiment_w, right_w, drawer_size])
+
 
 
     def toggle_assembly_panel(self):
@@ -553,12 +573,9 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             self.experiment_container.setVisible(False)
             
         self.left_container.setVisible(show)
-        
-        # Adjust splitter sizes
-        sizes = self.main_splitter.sizes()
-        sizes[0] = 350 if show else 0
-        sizes[1] = 0 # Ensure experiment is 0 if assembly is changing
-        self.main_splitter.setSizes(sizes)
+
+        # Keep the right 3D pane visible even if the user previously collapsed it.
+        self._set_main_splitter_layout(show_assembly=show, show_experiment=False)
         
         if show:
             # Identifies if we need to refresh the current visible tab
@@ -579,12 +596,9 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             self.experiment_tab.update_display()
             
         self.experiment_container.setVisible(show)
-        
-        # Adjust splitter sizes
-        sizes = self.main_splitter.sizes()
-        sizes[1] = 430 if show else 0
-        sizes[0] = 0 # Ensure assembly is 0 if experiment is changing
-        self.main_splitter.setSizes(sizes)
+
+        # Keep the right 3D pane visible even if the user previously collapsed it.
+        self._set_main_splitter_layout(show_assembly=False, show_experiment=show)
 
 if __name__ == "__main__":
     import sys
