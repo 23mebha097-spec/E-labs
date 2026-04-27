@@ -475,6 +475,9 @@ class ProgramPanel(QtWidgets.QWidget):
                 if len(parts) >= 3:
                     j_name = parts[1]
                     val = float(parts[2])
+            elif cmd == "HOME":
+                self.mw.reset_to_home()
+                return
             else:
                 # Potential Shorthand: Name Value
                 if len(parts) >= 2:

@@ -1,12 +1,24 @@
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 
+class KeyboardOnlyDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """SpinBox that only accepts keyboard input — no scroll wheel or step buttons."""
+    def stepBy(self, steps): pass          # Disable Up/Down arrow key stepping
+    def wheelEvent(self, event): event.ignore()  # Disable mouse scroll
+
 
 class IKFKPanel(QtWidgets.QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.mw = main_window
         self._joint_order = []
+        
+        # Animation state
+        self._anim_timer = QtCore.QTimer()
+        self._anim_timer.timeout.connect(self._on_anim_tick)
+        self._target_angles = []
+        self._current_angles = []
+        
         self.init_ui()
 
     def init_ui(self):
@@ -29,10 +41,11 @@ class IKFKPanel(QtWidgets.QWidget):
         title.setStyleSheet("color: #1565c0; font-size: 24px; font-weight: 700; padding: 4px 6px;")
         content_layout.addWidget(title)
 
-        subtitle = QtWidgets.QLabel("Inverse Kinematics input first, then Forward Kinematics using DH parameters")
+        subtitle = QtWidgets.QLabel("Inverse Kinematics and Forward Kinematics using the Standard DH convention as specified in Lab Manual BE04041011 (L.D. College of Engineering).")
         subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #546e7a; font-size: 14px; padding: 0 6px 8px 6px;")
+        subtitle.setStyleSheet("color: #546e7a; font-size: 14px; font-weight: 500; line-height: 1.4; padding: 0 6px 8px 6px;")
         content_layout.addWidget(subtitle)
+
 
         self.ik_group = QtWidgets.QFrame()
         self.ik_group.setStyleSheet(
@@ -62,6 +75,23 @@ class IKFKPanel(QtWidgets.QWidget):
         self.solve_ik_btn.clicked.connect(self.solve_ik)
         solver_row.addStretch()
         solver_row.addWidget(self.solve_ik_btn)
+
+        self.solve_smart_btn = QtWidgets.QPushButton("🚀 Smart Solve (CCD)")
+        self.solve_smart_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.solve_smart_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #43a047;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                padding: 8px 14px;
+                font-size: 14px;
+                font-weight: 700;
+            }
+            QPushButton:hover { background-color: #2e7d32; }
+        """)
+        self.solve_smart_btn.clicked.connect(self.solve_ik_smart)
+        solver_row.addWidget(self.solve_smart_btn)
         ik_layout.addLayout(solver_row)
 
         content_layout.addWidget(self.ik_group)
@@ -79,23 +109,19 @@ class IKFKPanel(QtWidgets.QWidget):
         fk_layout.addWidget(fk_header)
 
         tool_row = QtWidgets.QHBoxLayout()
-        self.refresh_dh_btn = QtWidgets.QPushButton("Match Rows with Active Joints")
-        self.refresh_dh_btn.setStyleSheet(self._ghost_btn_style())
-        self.refresh_dh_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.refresh_dh_btn.clicked.connect(self.rebuild_dh_table)
-        tool_row.addWidget(self.refresh_dh_btn)
-
-        self.load_theta_btn = QtWidgets.QPushButton("Load Current Joint Angles")
-        self.load_theta_btn.setStyleSheet(self._ghost_btn_style())
-        self.load_theta_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.load_theta_btn.clicked.connect(self.load_joint_angles_into_dh)
-        tool_row.addWidget(self.load_theta_btn)
-
-        self.run_fk_btn = QtWidgets.QPushButton("Compute FK")
+        
+        self.run_fk_btn = QtWidgets.QPushButton("🔄 Compute FK")
         self.run_fk_btn.setStyleSheet(self._primary_btn_style())
         self.run_fk_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.run_fk_btn.clicked.connect(self.update_display)
         tool_row.addWidget(self.run_fk_btn)
+
+        self.clear_dh_btn = QtWidgets.QPushButton("🗑️ Clear")
+        self.clear_dh_btn.setStyleSheet(self._ghost_btn_style())
+        self.clear_dh_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.clear_dh_btn.clicked.connect(self.clear_dh_table)
+        tool_row.addWidget(self.clear_dh_btn)
+
         tool_row.addStretch()
         fk_layout.addLayout(tool_row)
 
@@ -194,7 +220,7 @@ class IKFKPanel(QtWidgets.QWidget):
         return frame
 
     def _make_num_input(self, lo, hi, val, decimals):
-        spin = QtWidgets.QDoubleSpinBox()
+        spin = KeyboardOnlyDoubleSpinBox()
         spin.setRange(lo, hi)
         spin.setDecimals(decimals)
         spin.setValue(val)
@@ -320,6 +346,17 @@ class IKFKPanel(QtWidgets.QWidget):
         return rows
 
     def _a_matrix(self, theta_rad, d, a, alpha_rad):
+        """
+        Transformation matrix A_i from frame i-1 to frame i.
+        Basis: BE04041011 Lab Manual (Standard DH convention).
+        Formula: A_i = RotZ(theta_i) * TransZ(d_i) * TransX(a_i-1) * RotX(alpha_i-1)
+        
+        Resulting Matrix Structure (Perfected as per PDF page 34):
+        [ cos(θ)  -sin(θ)cos(α)   sin(θ)sin(α)   a*cos(θ) ]
+        [ sin(θ)   cos(θ)cos(α)  -cos(θ)sin(α)   a*sin(θ) ]
+        [   0        sin(α)          cos(α)         d     ]
+        [   0          0              0             1     ]
+        """
         ct, st = np.cos(theta_rad), np.sin(theta_rad)
         ca, sa = np.cos(alpha_rad), np.sin(alpha_rad)
         return np.array(
@@ -419,6 +456,7 @@ class IKFKPanel(QtWidgets.QWidget):
         self.dh_matrices_view.setHtml(html)
 
     def solve_ik(self):
+        """Solves IK using the Jacobian-based numerical method (DH-centric)."""
         rows = self._dh_rows()
         n = len(rows)
         if n == 0:
@@ -447,25 +485,87 @@ class IKFKPanel(QtWidgets.QWidget):
 
             J = np.zeros((3, n), dtype=float)
             for i in range(n):
-                tp = theta.copy()
-                tm = theta.copy()
-                tp[i] += eps
-                tm[i] -= eps
+                tp = theta.copy(); tm = theta.copy()
+                tp[i] += eps; tm[i] -= eps
                 J[:, i] = (pos_of(tp) - pos_of(tm)) / (2.0 * eps)
 
             jj_t = J @ J.T
             step = J.T @ np.linalg.solve(jj_t + (lam * lam) * np.eye(3), err)
-            step = np.clip(step, -0.35, 0.35)
+            step = np.clip(step, -0.2, 0.2)
             theta += step
 
         theta_deg = np.degrees(theta)
-        for i in range(n):
-            self.dh_table.setItem(i, 1, QtWidgets.QTableWidgetItem(f"{theta_deg[i]:.4f}"))
+        self._start_ik_animation(theta_deg)
+        
+        status = "converged" if converged else "best effort"
+        self.mw.log(f"DH IK: Solve {status} (Target: {target}).")
 
-        self.update_display()
+    def solve_ik_smart(self):
+        """Solves IK using the Robot core's robust CCD solver (3D model-centric)."""
+        joint_tab = getattr(self.mw, "joint_tab", None)
+        if not joint_tab or not joint_tab.joints:
+             QtWidgets.QMessageBox.warning(self, "IK", "No joints created in the robot model yet.")
+             return
 
-        solved_text = "converged" if converged else "best effort"
-        self.mw.log(f"DH IK solve complete ({solved_text}).")
+        # Find TCP link (usually the last child in the model)
+        links = list(self.mw.robot.links.values())
+        if not links: return
+        tcp_link = links[-1] 
+        
+        target = [self.ik_x.value(), self.ik_y.value(), self.ik_z.value()]
+        
+        # Snapshot current angles
+        old_angles = {n: j.current_value for n, j in self.mw.robot.joints.items()}
+        
+        # Use robust CCD solver
+        success = self.mw.robot.inverse_kinematics(target, tcp_link, max_iters=300, tolerance=0.5)
+        
+        if success:
+            new_angles_deg = [self.mw.robot.joints[jn].current_value for jn in self._joint_order]
+            # Reset to animate properly
+            for n, val in old_angles.items():
+                self.mw.robot.joints[n].current_value = val
+            self.mw.robot.update_kinematics()
+            
+            self._start_ik_animation(new_angles_deg)
+            self.mw.log(f"Smart IK: Target {target} reached.")
+        else:
+            self.mw.log(f"Smart IK: Failed to reach target {target}.")
+            QtWidgets.QMessageBox.information(self, "IK", "Target might be out of reachable workspace.")
+
+    def _start_ik_animation(self, target_deg_list):
+        self._target_angles = list(target_deg_list)
+        self._current_angles = []
+        for i, child_name in enumerate(self._joint_order):
+            joint_tab = getattr(self.mw, "joint_tab", None)
+            curr = 0.0
+            if joint_tab and child_name in joint_tab.joints:
+                curr = joint_tab.joints[child_name].get("current_angle", 0.0)
+            self._current_angles.append(curr)
+        
+        self._anim_timer.start(30)
+
+    def _on_anim_tick(self):
+        done = True
+        step_size = 2.0 # degrees per tick
+        
+        for i, child_name in enumerate(self._joint_order):
+            curr = self._current_angles[i]
+            target = self._target_angles[i]
+            
+            if abs(target - curr) < step_size:
+                self._current_angles[i] = target
+            else:
+                self._current_angles[i] += np.sign(target - curr) * step_size
+                done = False
+                
+            self.apply_rotation(child_name, self._current_angles[i])
+            self.sync_slider(child_name, self._current_angles[i])
+
+        if done:
+            self._anim_timer.stop()
+            self.update_display()
+            self.mw.show_toast("Target Reached", "success")
 
     def refresh_sliders(self):
         # Joint rotation controls were removed from this panel by UI request.
@@ -499,3 +599,9 @@ class IKFKPanel(QtWidgets.QWidget):
             row = self._joint_order.index(child_name)
             self.dh_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{value:.4f}"))
         self.update_display()
+    def clear_dh_table(self):
+        for r in range(self.dh_table.rowCount()):
+            for c in range(1, 5):
+                self.dh_table.setItem(r, c, QtWidgets.QTableWidgetItem("0.0000"))
+        self.update_display()
+

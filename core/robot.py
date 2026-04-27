@@ -18,6 +18,36 @@ class Link:
         self.parent_joint = None
         self.child_joints = []
         self.custom_tcp_offset = None # Optional [x, y, z] relative to link frame (Live Point)
+        
+        # Physics Properties (Default placeholders)
+        self.mass = 1.0
+        self.inertia = {"ixx": 0.001, "ixy": 0.0, "ixz": 0.0, "iyy": 0.001, "iyz": 0.0, "izz": 0.001}
+        self.com = [0.0, 0.0, 0.0]
+        
+        # Auto-calculate from mesh geometry
+        self.compute_physics_from_mesh()
+
+    def compute_physics_from_mesh(self):
+        """Calculates CoG and Inertia Tensor based on mesh geometry using trimesh."""
+        if self.mesh is None:
+            return
+            
+        try:
+            # trimesh.center_mass returns the CoG (weighted by volume)
+            cm = self.mesh.center_mass
+            if cm is not None:
+                self.com = cm.tolist()
+            
+            # trimesh.moment_inertia returns the 3x3 inertia tensor for unit mass
+            I = self.mesh.moment_inertia
+            if I is not None:
+                self.inertia = {
+                    "ixx": float(I[0, 0]), "ixy": float(I[0, 1]), "ixz": float(I[0, 2]),
+                    "iyy": float(I[1, 1]), "iyz": float(I[1, 2]), "izz": float(I[2, 2])
+                }
+        except Exception:
+            # Fallback to simple centroid if volume-based calculation fails (e.g. non-watertight)
+            self.com = self.mesh.centroid.tolist()
 
 class Joint:
     def __init__(self, name, parent_link, child_link, joint_type="revolute"):
@@ -29,6 +59,7 @@ class Joint:
         
         self.origin = np.array([0.0, 0.0, 0.0]) # Relative to parent link frame
         self.axis = np.array([0.0, 0.0, 1.0])   # Unit vector
+        self.axis_name = "Z"                    # Explicit axis name (X, Y, or Z)
         
         self.min_limit = -180.0
         self.max_limit = 180.0
@@ -82,6 +113,12 @@ class Robot:
         self.joints = {}
         self.base_link = None
         self.joint_relations = {} # {master_name: [(slave_name, ratio), ...]}
+
+    def reset_to_home(self, home_angle=0.0):
+        """Sets all joints to the specified home angle."""
+        for joint in self.joints.values():
+            joint.current_value = home_angle
+        self.update_kinematics()
 
     def add_joint_relation(self, master, slave, ratio=1.0):
         if master not in self.joint_relations:

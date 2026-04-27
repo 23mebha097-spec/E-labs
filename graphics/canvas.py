@@ -78,6 +78,16 @@ class RobotCanvas(QtWidgets.QWidget):
         
         self.interaction_mode = "rotate" # 'rotate'
         self.picking_focus_point = False  # Focus point picking mode
+        
+        # --- 3D ENGINE HUD (Live Point Location) ---
+        self.plotter.add_text(
+            "LIVE POINT: X: 0.00, Y: 0.00, Z: 0.00 cm",
+            position='upper_left',
+            font_size=12,
+            color='#1565c0',
+            name="live_point_hud",
+            shadow=True
+        )
 
     def _dist_point_to_segment(self, p, a, b):
         """Calculates distance from point p to line segment (a, b)"""
@@ -87,6 +97,19 @@ class RobotCanvas(QtWidgets.QWidget):
         if denom < 1e-18: return np.linalg.norm(pa)
         h = np.clip(np.dot(pa, ba) / denom, 0, 1)
         return np.linalg.norm(pa - ba * h)
+
+    def _vtk_mat_to_numpy(self, vtk_mat):
+        """Safely converts a vtkMatrix4x4 (or numpy array) to a 4x4 numpy array."""
+        if vtk_mat is None:
+            return np.eye(4)
+        if isinstance(vtk_mat, np.ndarray):
+            return vtk_mat
+        # It's a vtkMatrix4x4 object
+        m = np.eye(4)
+        for i in range(4):
+            for j in range(4):
+                m[i, j] = vtk_mat.GetElement(i, j)
+        return m
 
     def _on_face_pick_click(self, click_pos):
         """Enhanced face picking - detects geometric features and picks specific loops."""
@@ -98,51 +121,68 @@ class RobotCanvas(QtWidgets.QWidget):
             link_name = next((name for name, a in self.actors.items() if a == actor), None)
             
             if link_name:
-                mesh = pv.wrap(actor.GetMapper().GetInput())
+                # 0. IMPORTANT: Clean the mesh for connectivity! 
+                # STL meshes often have 'unwelded' vertices which break feature growth.
+                raw_mesh = pv.wrap(actor.GetMapper().GetInput())
+                mesh = raw_mesh.clean(tolerance=1e-5) # Merge coincident points
+                
+                mat = self._vtk_mat_to_numpy(actor.user_matrix)
+                inv_mat = np.linalg.inv(mat)
                 
                 # 1. Get seed face normal
                 seed_normal = self._get_face_normal(mesh, cell_id)
                 
-                # 2. Grow region of coplanar/co-cylindrical faces
-                feature_cells = self._grow_feature_region(mesh, cell_id, seed_normal)
+                # 2. Grow feature region (High tolerance to capture whole faces/cylinders)
+                # Now that mesh is cleaned, neighbors will be found correctly.
+                feature_cells = self._grow_feature_region(mesh, cell_id, seed_normal, angle_tol=35.0)
                 
-                # 3. Find ALL loops on this feature (e.g. outer boundary and holes)
+                # 3. Extract all possible alignment loops (outer boundaries and internal holes)
                 loops = self._extract_boundary_edges(mesh, feature_cells)
                 
-                if not loops:
-                    return False
-                
-                # 4. Find the loop closest to the user's click
-                mat = actor.user_matrix
-                inv_mat = np.linalg.inv(mat)
-                world_pick_pt = self.cell_picker.GetPickPosition()
+                # 4. Target selection based on click proximity
+                world_pick_pt = np.array(self.cell_picker.GetPickPosition())
                 local_pick_pt = (inv_mat @ np.append(world_pick_pt, 1))[:3]
                 
-                best_loop = None
-                min_dist = float('inf')
-                
-                for loop in loops:
-                    for edge in loop:
-                        p1 = np.array(mesh.GetPoint(edge[0]))
-                        p2 = np.array(mesh.GetPoint(edge[1]))
-                        d = self._dist_point_to_segment(local_pick_pt, p1, p2)
-                        if d < min_dist:
-                            min_dist = d
-                            best_loop = loop
-                
-                if best_loop:
-                    # 5. Calculate center and normal for JUST this loop
+                if loops:
+                    # Find loop closest to click point (surgically targets holes)
+                    loop_dists = []
+                    for loop in loops:
+                        loop_pts = np.array([mesh.GetPoint(edge[0]) for edge in loop])
+                        d = np.min(np.linalg.norm(loop_pts - local_pick_pt, axis=1))
+                        loop_dists.append(d)
+                    
+                    best_loop = loops[np.argmin(loop_dists)]
                     center, normal = self._calc_loop_center_normal(mesh, best_loop, seed_normal)
                     
-                    rot = mat[:3, :3]
-                    world_normal = rot @ normal
-                    world_center = (mat @ np.append(center, 1))[:3]
+                    # Highlight ONLY the specific edge/loop selected
+                    self._highlight_feature_boundary(mesh, best_loop, link_name, mat, color=self.picking_color)
+                else:
+                    # FALLBACK: Use centroid of the ENTIRE feature cluster (e.g. whole disk)
+                    all_cell_pts = []
+                    for cid in feature_cells:
+                        c = mesh.GetCell(cid)
+                        for i in range(c.GetNumberOfPoints()):
+                            all_cell_pts.append(mesh.GetPoint(c.GetPointId(i)))
                     
-                    if self.on_face_picked_callback:
-                        self.on_face_picked_callback(link_name, world_center, world_normal)
+                    center = np.mean(all_cell_pts, axis=0) if all_cell_pts else np.zeros(3)
+                    normal = seed_normal
+                    self._highlight_feature_surface(mesh, feature_cells, link_name, mat, color=self.picking_color)
+
+                # 5. Transform to World Coordinates
+                rot = mat[:3, :3]
+                world_normal = rot @ normal
+                norm_len = np.linalg.norm(world_normal)
+                if norm_len > 1e-9:
+                    world_normal /= norm_len
                     
-                    # 6. Visual Highlight - show ONLY the selected boundary loop
-                    self._highlight_feature_boundary(mesh, best_loop, link_name, mat)
+                world_center = (mat @ np.append(center, 1))[:3]
+                
+                # Visual Feedback: Show a small sphere at the PICKED CENTER
+                self.plotter.add_mesh(pv.Sphere(radius=0.3 * self.grid_units_per_cm, center=world_center), 
+                                    color="white", name=f"pick_center_marker", pickable=False)
+                
+                if self.on_face_picked_callback:
+                    self.on_face_picked_callback(link_name, world_center, world_normal)
                 
                 self.picking_face = False
                 self.plotter.render()
@@ -163,27 +203,33 @@ class RobotCanvas(QtWidgets.QWidget):
             return normal / norm if norm > 0 else np.array([0,0,1])
         return np.array([0,0,1])
 
-    def _grow_feature_region(self, mesh, seed_id, seed_normal, angle_tol=10.0):
-        """Grow region of faces with similar normals - properly finds all neighbors"""
-        # Build connectivity for neighbor finding
+    def _grow_feature_region(self, mesh, seed_id, seed_normal, angle_tol=40.0):
+        """Grow region of faces using neighbor-to-neighbor normal comparison.
+        This correctly handles both flat faces AND curved surfaces (cylinders).
+        For flat faces: all normals are nearly identical, so seed comparison works.
+        For cylinders: adjacent faces differ slightly, so we compare neighbor-to-neighbor.
+        """
         mesh.BuildLinks()
         
         visited = set()
-        to_visit = [seed_id]
         feature = []
+        # Store (cell_id, parent_normal) so we compare to the NEIGHBOR's normal
+        to_visit = [(seed_id, seed_normal)]
         
         cos_tol = np.cos(np.radians(angle_tol))
         
-        while to_visit and len(feature) < 1000:  # Increased limit for circular features
-            current = to_visit.pop(0)  # Use queue (FIFO) for better growth pattern
+        # Increased limit for high-resolution parts
+        while to_visit and len(feature) < 30000:
+            current, parent_normal = to_visit.pop(0)
             if current in visited or current < 0 or current >= mesh.GetNumberOfCells():
                 continue
                 
             visited.add(current)
             current_normal = self._get_face_normal(mesh, current)
             
-            # Check if normal is similar (coplanar/co-cylindrical check)
-            similarity = abs(np.dot(current_normal, seed_normal))
+            # Compare to PARENT normal (neighbor-to-neighbor), not seed
+            # This allows smooth growth around curved surfaces
+            similarity = abs(np.dot(current_normal, parent_normal))
             if similarity >= cos_tol:
                 feature.append(current)
                 
@@ -193,18 +239,17 @@ class RobotCanvas(QtWidgets.QWidget):
                 
                 for i in range(n_edges):
                     edge = cell.GetEdge(i)
-                    # Get the two point IDs of this edge
                     p1 = edge.GetPointId(0)
                     p2 = edge.GetPointId(1)
                     
-                    # Find cells that share this edge
                     id_list = vtkCommonCore.vtkIdList()
                     mesh.GetCellEdgeNeighbors(current, p1, p2, id_list)
                     
                     for j in range(id_list.GetNumberOfIds()):
                         neighbor_id = id_list.GetId(j)
                         if neighbor_id not in visited:
-                            to_visit.append(neighbor_id)
+                            # Pass CURRENT normal as parent for next comparison
+                            to_visit.append((neighbor_id, current_normal))
                     
         return feature if feature else [seed_id]
 
@@ -275,20 +320,69 @@ class RobotCanvas(QtWidgets.QWidget):
         return all_loops
 
     def _calc_loop_center_normal(self, mesh, loop, seed_normal):
-        """Calculate centroid of a boundary loop and return with seed normal"""
-        all_pts = []
+        """Calculates robust center (length-weighted) and normal for a loop."""
+        edge_pts = []
         for edge in loop:
-            all_pts.append(np.array(mesh.GetPoint(edge[0])))
-        
-        if all_pts:
-            center = np.mean(all_pts, axis=0)
+            p1 = np.array(mesh.GetPoint(edge[0]))
+            p2 = np.array(mesh.GetPoint(edge[1]))
+            edge_pts.append((p1, p2))
+            
+        if not edge_pts:
+            return np.zeros(3), seed_normal
+            
+        # 1. Length-Weighted Centroid
+        # This is critical for non-uniform meshes (e.g. circles with unequal edge lengths)
+        total_len = 0
+        sum_pos = np.zeros(3)
+        for p1, p2 in edge_pts:
+            length = np.linalg.norm(p2 - p1)
+            if length < 1e-9: continue
+            mid = (p1 + p2) / 2.0
+            sum_pos += mid * length
+            total_len += length
+            
+        if total_len > 1e-9:
+            center = sum_pos / total_len
         else:
-            center = np.zeros(3)
+            center = edge_pts[0][0]
+            
+        if len(edge_pts) < 3:
+            return center, seed_normal
+            
+        # 2. Newell's Method for robust normal using all segments
+        n = np.zeros(3)
+        for p1, p2 in edge_pts:
+            n[0] += (p1[1] - p2[1]) * (p1[2] + p2[2])
+            n[1] += (p1[2] - p2[2]) * (p1[0] + p2[0])
+            n[2] += (p1[0] - p2[0]) * (p1[1] + p2[1])
+            
+        norm_len = np.linalg.norm(n)
+        if norm_len > 1e-9:
+            loop_normal = n / norm_len
+            if np.dot(loop_normal, seed_normal) < 0:
+                loop_normal = -loop_normal
+            return center, loop_normal
         
         return center, seed_normal
 
-    def _highlight_feature_boundary(self, mesh, boundary_edges, link_name, matrix):
-        """Create visual highlight for feature boundary"""
+    def _highlight_feature_surface(self, mesh, cell_ids, link_name, matrix, color="blue", opacity=0.35):
+        """Creates a semi-transparent surface highlight covering the entire face area."""
+        try:
+            surface_mesh = mesh.extract_cells(cell_ids)
+            prefix = getattr(self, 'highlight_prefix', 'pick')
+            surface_name = f"{prefix}_surface_{link_name}"
+            
+            # matrix must be numpy 4x4
+            np_matrix = self._vtk_mat_to_numpy(matrix)
+            
+            self.plotter.add_mesh(surface_mesh, color=color, opacity=opacity,
+                                name=surface_name, user_matrix=np_matrix, pickable=False,
+                                lighting=False) # Flat color stands out better
+        except Exception:
+            pass
+
+    def _highlight_feature_boundary(self, mesh, boundary_edges, link_name, matrix, color="blue"):
+        """Create thicker visual highlight for feature boundary."""
         if not boundary_edges:
             return
             
@@ -299,12 +393,10 @@ class RobotCanvas(QtWidgets.QWidget):
         
         for edge in boundary_edges:
             # Get or create points
-            if edge[0] not in point_map:
-                point_map[edge[0]] = len(points)
-                points.append(mesh.GetPoint(edge[0]))
-            if edge[1] not in point_map:
-                point_map[edge[1]] = len(points)
-                points.append(mesh.GetPoint(edge[1]))
+            for pt_id in [edge[0], edge[1]]:
+                if pt_id not in point_map:
+                    point_map[pt_id] = len(points)
+                    points.append(mesh.GetPoint(pt_id))
             
             # Add line: [num_points, idx1, idx2]
             lines.extend([2, point_map[edge[0]], point_map[edge[1]]])
@@ -313,9 +405,13 @@ class RobotCanvas(QtWidgets.QWidget):
             boundary_mesh = pv.PolyData(points)
             boundary_mesh.lines = np.array(lines)
             
-            highlight_name = f"pick_highlight_{link_name}"
-            self.plotter.add_mesh(boundary_mesh, color="blue", line_width=5,
-                                name=highlight_name, user_matrix=matrix, pickable=False)
+            prefix = getattr(self, 'highlight_prefix', 'pick')
+            highlight_name = f"{prefix}_highlight_{link_name}"
+            
+            np_matrix = self._vtk_mat_to_numpy(matrix)
+            
+            self.plotter.add_mesh(boundary_mesh, color=color, line_width=5,
+                                name=highlight_name, user_matrix=np_matrix, pickable=False)
 
     def clear_highlights(self):
         """Removes all temporary selection markers (faces, arrows) from the scene."""
@@ -917,9 +1013,11 @@ class RobotCanvas(QtWidgets.QWidget):
         # Convert trimesh to pyvista if needed
         import trimesh
         if isinstance(mesh, trimesh.Trimesh):
-            poly = pv.wrap(mesh)
+            # Clean mesh (merge duplicate points) - CRITICAL for geometric feature detection
+            poly = pv.wrap(mesh).clean()
         else:
-            poly = mesh # assume it's already pyvista compatible
+            # Wrap and clean in case it's a generic VTK mesh or needs welding
+            poly = pv.wrap(mesh).clean()
             
         # Use provided color, hide edges for cleaner look
         actor = self.plotter.add_mesh(poly, color=color, show_edges=False, name=link_name)
@@ -1033,6 +1131,19 @@ class RobotCanvas(QtWidgets.QWidget):
             self._selection_dim_actors.append(txt_actor)
         except Exception:
             pass
+
+    def update_hud_coords(self, x, y, z):
+        """Updates the Live Point HUD text on the 3D screen."""
+        text = f"LIVE POINT: X: {x:.2f}, Y: {y:.2f}, Z: {z:.2f} cm"
+        self.plotter.add_text(
+            text, 
+            position='upper_left', 
+            font_size=12, 
+            color='#1565c0', 
+            name="live_point_hud",
+            shadow=True
+        )
+        self.plotter.render()
 
     def update_transforms(self, robot):
         """Updates all actor transforms based on robot's current kinematics state."""
@@ -1400,8 +1511,8 @@ class RobotCanvas(QtWidgets.QWidget):
         # Check if simulation is running to prevent any expiration
         is_running = False
         try:
-            if hasattr(self.window(), 'program_tab'):
-                is_running = self.window().program_tab.is_running
+            if hasattr(self.window(), 'experiment_tab') and hasattr(self.window().experiment_tab, 'program_tab'):
+                is_running = self.window().experiment_tab.program_tab.is_running
         except:
             pass
 

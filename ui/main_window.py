@@ -3,7 +3,6 @@ from graphics.canvas import RobotCanvas
 from core.robot import Robot
 from ui.panels.align_panel import AlignPanel
 from ui.panels.joint_panel import JointPanel
-from ui.panels.matrices_panel import MatricesPanel
 from ui.panels.experiment_panel import ExperimentPanel
 from ui.panels.program_panel import ProgramPanel
 from ui.panels.gripper_panel import GripperPanel
@@ -42,6 +41,9 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         # Connect signals
         self.log_signal.connect(self.log)
+        
+        # Center the window and fix geometry warnings
+        self.center_on_screen()
 
     def init_ui(self):
         central = QtWidgets.QWidget()
@@ -216,7 +218,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             ("Links", "Manage robot links and components"),
             ("Align", "Align components together"),
             ("Joint", "Create and control joints"),
-            ("Code", "Program robot movements"),
             ("Gripper", "Control and calibrate robotic grippers")
         ]
         
@@ -230,14 +231,12 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         self.align_tab = AlignPanel(self)
         self.joint_tab = JointPanel(self)
-        self.matrices_tab = MatricesPanel(self)
-        self.program_tab = ProgramPanel(self)
         self.gripper_tab = GripperPanel(self)
+        self.simulation_tab = self.gripper_tab  # Alias for Torotron compatibility
         
         self.panel_stack.addWidget(self.links_tab)
         self.panel_stack.addWidget(self.align_tab)
         self.panel_stack.addWidget(self.joint_tab)
-        self.panel_stack.addWidget(self.program_tab)
         self.panel_stack.addWidget(self.gripper_tab)
         
         for name, tooltip in nav_items:
@@ -315,6 +314,29 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         """)
         self.iso_btn.clicked.connect(lambda: self.canvas.view_isometric())
         
+        # --- Home Position Button (next to isometric) ---
+        self.home_btn = QtWidgets.QPushButton(self.canvas)
+        self.home_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
+        self.home_btn.setToolTip("Reset Robot to Home Position (0°)")
+        self.home_btn.setFixedSize(38, 38)
+        self.home_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.home_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                border: 2px solid #e0e0e0;
+                border-radius: 19px;
+                padding: 6px;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+                border-color: #1976d2;
+            }
+            QPushButton:pressed {
+                background-color: #e3f2fd;
+            }
+        """)
+        self.home_btn.clicked.connect(self.reset_to_home)
+        
         # --- Focus Point Button (next to isometric) ---
         self.focus_btn = QtWidgets.QPushButton(self.canvas)
         self.focus_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton))
@@ -380,6 +402,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         def patched_resize(event):
             original_resize(event)
             self.iso_btn.move(self.canvas.width() - 160, 24)
+            self.home_btn.move(self.canvas.width() - 204, 24)
             self.focus_btn.move(self.canvas.width() - 160, 68)
             self.gripper_surface_btn.move(self.canvas.width() - 180, self.canvas.height() - 60)
         
@@ -532,15 +555,22 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.code_drawer = CodeDrawer(self)
         self.main_splitter.addWidget(self.code_drawer)
         
-        # Set initial side-to-side bias (Assembly=350, Experiment=0, RightSplitter=850, Code=0)
-        self.main_splitter.setSizes([350, 0, 850, 0])
-        
-        self.main_layout.addWidget(self.main_splitter)
-        
-        # 3D View Callbacks
-        self.canvas.on_drop_callback = self.sync_link_transform
-        self.canvas.on_drop_callback = self.sync_link_transform
         self.canvas.on_deselect_callback = self.on_deselect
+        
+        # --- FINALIZE LAYOUT ---
+        self.main_layout.addWidget(self.main_splitter, 1)
+
+        # Fix for geometry warnings: Set splitter sizes after a small delay
+        # This ensures the window is fully mapped before we move sub-components
+        QtCore.QTimer.singleShot(100, lambda: self.main_splitter.setSizes([350, 0, 850, 0]))
+
+    def center_on_screen(self):
+        """Standard helper to center the window on the primary screen."""
+        frame_gm = self.frameGeometry()
+        screen = QtWidgets.QApplication.desktop().screenNumber(QtWidgets.QApplication.desktop().cursor().pos())
+        center_point = QtWidgets.QApplication.desktop().screenGeometry(screen).center()
+        frame_gm.moveCenter(center_point)
+        self.move(frame_gm.topLeft())
 
     def _set_main_splitter_layout(self, show_assembly, show_experiment):
         sizes = self.main_splitter.sizes()
@@ -599,6 +629,34 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
 
         # Keep the right 3D pane visible even if the user previously collapsed it.
         self._set_main_splitter_layout(show_assembly=False, show_experiment=show)
+
+    def reset_to_home(self):
+        """Resets all robot joint values to the global HOME_POSITION."""
+        # Try to get HOME_POSITION from main module
+        import __main__
+        home_angle = getattr(__main__, 'HOME_POSITION', 0.0)
+        
+        self.log(f"🏠 Resetting robot to Home Position ({home_angle}°)...")
+        self.robot.reset_to_home(home_angle)
+        
+        # Sync all UI panels
+        if hasattr(self, 'joint_tab'):
+            # Update internal joint_tab dictionary
+            for child_name, data in self.joint_tab.joints.items():
+                data['current_angle'] = home_angle
+            self.joint_tab.refresh_joints_history()
+            
+        if hasattr(self, 'experiment_tab'):
+            self.experiment_tab.refresh_sliders()
+            self.experiment_tab.update_display()
+            
+        # Update 3D view
+        self.canvas.update_transforms(self.robot)
+        self.log("✅ Home Position Restored.")
+        
+        # Show a friendly toast if method exists
+        if hasattr(self, 'show_toast'):
+            self.show_toast("Home Position Reset", "success")
 
 if __name__ == "__main__":
     import sys

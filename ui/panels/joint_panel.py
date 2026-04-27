@@ -1244,14 +1244,14 @@ class JointPanel(QtWidgets.QWidget):
         self.mw.log(f"  Pivot (CM):  X: {pivot_cm[0]:.3f}, Y: {pivot_cm[1]:.3f}, Z: {pivot_cm[2]:.3f}")
         
         # --- 3. AUTO-APPEND TO CODE EDITOR ---
-        if hasattr(self.mw, 'program_tab'):
-            current_code = self.mw.program_tab.code_edit.toPlainText()
-            # If default text is there, clear it or append
-            new_cmd = f"{joint_id} 0"
-            if "Example Program" in current_code and len(current_code.splitlines()) < 10:
-                self.mw.program_tab.code_edit.appendPlainText(new_cmd)
+        if hasattr(self.mw, 'experiment_tab') and hasattr(self.mw.experiment_tab, 'program_tab'):
+            current_code = self.mw.experiment_tab.program_tab.code_edit.toPlainText()
+            new_cmd = f"JOINT {joint_id} 0.00"
+            
+            if new_cmd not in current_code:
+                self.mw.experiment_tab.program_tab.code_edit.appendPlainText(new_cmd)
             else:
-                self.mw.program_tab.code_edit.appendPlainText(new_cmd)
+                self.mw.experiment_tab.program_tab.code_edit.appendPlainText(new_cmd)
             self.mw.log(f"Auto-generated code: '{new_cmd}' added to Code tab.")
         self.mw.log(f"  Parent: {self.parent_object}")
         self.mw.log(f"  Child: {self.child_object}")

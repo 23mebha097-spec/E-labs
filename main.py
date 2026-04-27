@@ -2,6 +2,11 @@ import sys
 from PyQt5 import QtWidgets
 from ui.main_window import MainWindow
 
+# --- ToRoTRoN Robot Configuration ---
+# The default angle for all joints when the Home command or button is triggered.
+HOME_POSITION = 0.0 
+
+
 import traceback
 
 def exception_handler(exctype, value, tb):

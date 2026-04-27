@@ -94,8 +94,8 @@ class ProjectMixin:
                         robot_data["ui_state"]["joint_panel_joints"][child_name] = clean_data
 
                 # Program Tab Code
-                if hasattr(self, 'program_tab'):
-                    robot_data["ui_state"]["program_code"] = self.program_tab.code_edit.toPlainText()
+                if hasattr(self, 'experiment_tab') and hasattr(self.experiment_tab, 'program_tab'):
+                    robot_data["ui_state"]["program_code"] = self.experiment_tab.program_tab.code_edit.toPlainText()
 
                 # Align Panel Stored Point (for continuing joint creation)
                 if hasattr(self, 'align_tab'):
@@ -248,8 +248,8 @@ class ProjectMixin:
                     self.joint_tab.refresh_links()
 
                 # Restore Program Tab
-                if hasattr(self, 'program_tab'):
-                    self.program_tab.code_edit.setPlainText(ui_state.get("program_code", ""))
+                if hasattr(self, 'experiment_tab') and hasattr(self.experiment_tab, 'program_tab'):
+                    self.experiment_tab.program_tab.code_edit.setPlainText(ui_state.get("program_code", ""))
 
                 # Restore Align Panel alignment data
                 if hasattr(self, 'align_tab'):

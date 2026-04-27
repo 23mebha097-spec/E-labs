@@ -2,6 +2,8 @@ from PyQt5 import QtWidgets, QtCore
 
 from ui.panels.matrices_panel import MatricesPanel
 from ui.panels.ik_fk_panel import IKFKPanel
+from ui.panels.result_panel import ResultPanel
+from ui.panels.program_panel import ProgramPanel
 
 
 class ExperimentPanel(QtWidgets.QWidget):
@@ -45,9 +47,13 @@ class ExperimentPanel(QtWidgets.QWidget):
 
         self.matrices_tab = MatricesPanel(self.mw)
         self.ik_fk_tab = IKFKPanel(self.mw)
+        self.result_tab = ResultPanel(self.mw)
+        self.program_tab = ProgramPanel(self.mw)
 
         self.tabs.addTab(self.matrices_tab, "Matrices")
         self.tabs.addTab(self.ik_fk_tab, "IK and FK")
+        self.tabs.addTab(self.result_tab, "Result")
+        self.tabs.addTab(self.program_tab, "Code")
 
         layout.addWidget(self.tabs)
 
