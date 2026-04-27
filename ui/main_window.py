@@ -658,6 +658,48 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         if hasattr(self, 'show_toast'):
             self.show_toast("Home Position Reset", "success")
 
+    def make_robot(self):
+        """
+        Finalize the current assembly by rebuilding kinematics and syncing UI state.
+        Returns True when the robot model is ready enough to use.
+        """
+        if not self.robot.links:
+            self.log("Cannot finalize assembly: no links have been imported yet.")
+            self.show_toast("Import links first", "warning")
+            return False
+
+        if not self.robot.base_link:
+            self.log("Cannot finalize assembly: set a base link before building the robot.")
+            self.show_toast("Set a base link first", "warning")
+            return False
+
+        try:
+            self.robot.update_kinematics()
+            self.canvas.update_transforms(self.robot)
+            self.update_link_colors()
+
+            if hasattr(self, "joint_tab"):
+                self.joint_tab.refresh_links()
+                self.joint_tab.refresh_joints_history()
+
+            if hasattr(self, "gripper_tab"):
+                self.gripper_tab.refresh_joints()
+
+            if hasattr(self, "experiment_tab"):
+                self.experiment_tab.refresh_sliders()
+                self.experiment_tab.update_display()
+
+            joint_count = len(self.robot.joints)
+            if joint_count:
+                self.log(f"Robot model ready: {joint_count} joint(s) linked from base '{self.robot.base_link.name}'.")
+            else:
+                self.log(f"Assembly refreshed with base '{self.robot.base_link.name}', but no joints are defined yet.")
+            return True
+        except Exception as exc:
+            self.log(f"MAKE ROBO ERROR: {exc}")
+            self.show_toast("Unable to finalize assembly", "error")
+            return False
+
 if __name__ == "__main__":
     import sys
     app = QtWidgets.QApplication(sys.argv)

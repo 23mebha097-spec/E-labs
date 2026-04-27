@@ -1125,9 +1125,9 @@ class GripperPanel(QtWidgets.QWidget):
 
     def on_make_robo(self):
         self.mw.log("🚀 FINALIZING ASSEMBLY: Building Robot Kinematic Tree...")
-        self.mw.make_robot()
-        self.refresh_joints()
-        self.mw.show_toast("Assembly Finalized", "success")
+        if self.mw.make_robot():
+            self.refresh_joints()
+            self.mw.show_toast("Assembly Finalized", "success")
 
     def refresh_sliders(self):
         self.refresh_joints()
