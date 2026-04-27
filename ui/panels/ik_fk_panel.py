@@ -472,8 +472,35 @@ class IKFKPanel(QtWidgets.QWidget):
         eps = 1e-5
 
         def pos_of(th):
-            T, _ = self._fk_with_thetas_rad(th)
-            return T[:3, 3]
+            joint_tab = getattr(self.mw, "joint_tab", None)
+            if not joint_tab or not joint_tab.joints:
+                T, _ = self._fk_with_thetas_rad(th)
+                return T[:3, 3]
+                
+            old_angles = {n: j.current_value for n, j in self.mw.robot.joints.items()}
+            
+            for i, child_name in enumerate(self._joint_order):
+                if child_name in self.mw.robot.joints:
+                    val_deg = np.degrees(th[i])
+                    self.mw.robot.joints[child_name].current_value = val_deg
+                    if child_name in self.mw.robot.joint_relations:
+                        for s_id, ratio in self.mw.robot.joint_relations[child_name]:
+                            if s_id in self.mw.robot.joints:
+                                self.mw.robot.joints[s_id].current_value = val_deg * ratio
+
+            self.mw.robot.update_kinematics()
+            
+            links = list(self.mw.robot.links.values())
+            if not links:
+                pos = np.zeros(3)
+            else:
+                pos = links[-1].t_world[:3, 3]
+                
+            for n, val in old_angles.items():
+                self.mw.robot.joints[n].current_value = val
+            self.mw.robot.update_kinematics()
+            
+            return pos
 
         converged = False
         for _ in range(max_iters):

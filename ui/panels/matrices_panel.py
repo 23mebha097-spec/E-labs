@@ -373,18 +373,12 @@ class MatricesPanel(QtWidgets.QWidget):
 
             html += f'<div class="matrix-box">'
             html += f'  <div class="box-header">{result["title"]}</div>'
-            html += (
-                f"<div class='meta-row'>"
-                f"type={result['joint_type']}, "
-                f"theta={self._display_value(result['theta0_deg']):.3f} deg, "
-                f"d={self._display_value(result['d']):.3f}, "
-                f"a={self._display_value(result['a']):.3f}, "
-                f"alpha={self._display_value(result['alpha_deg']):.3f} deg, "
-                f"q={self._display_value(result['q_value']):.3f}"
-                f"</div>"
-            )
 
-            html += "<div class='sub-head'>Local A{}</div>".format(idx)
+            # Interpret the internal units (meters) directly to cm by multiplying by 100
+            joint = ordered_joints[idx - 1]
+            ox, oy, oz = joint.origin
+            ox, oy, oz = ox * 100, oy * 100, oz * 100
+            html += f"<div class='sub-head'>Local A{idx} <span style='font-weight:normal; color:#64748b; font-size:12px; margin-left:10px;'>(Origin: {ox:.3f}, {oy:.3f}, {oz:.3f} cm)</span></div>"
             html += self.format_matrix_html(result["local"])
 
             html += "<div class='sub-head'>Cumulative T0{}</div>".format(idx)
