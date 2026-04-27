@@ -171,17 +171,15 @@ Firmware generation produces Arduino-compatible `.ino` code for ESP32 with:
 
 ---
 
-## Contributing
+## Contributors
 
-Contributions are welcome.
+Check out our [full list of contributors](CONTRIBUTORS.md).
 
-1. Fork the repository.
-2. Create a feature branch.
-3. Commit your changes.
-4. Open a pull request.
+1. [Arman Amreliya](https://github.com/ArmanAmreliya)
+2. [Bhavin](https://github.com/Bhavin)
 
 ---
 
 ## License
 
-MIT License
+This project is licensed under the [MIT License](LICENSE).
