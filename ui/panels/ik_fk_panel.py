@@ -1,216 +1,222 @@
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore
 import numpy as np
 
 class KeyboardOnlyDoubleSpinBox(QtWidgets.QDoubleSpinBox):
-    """SpinBox that only accepts keyboard input — no scroll wheel or step buttons."""
-    def stepBy(self, steps): pass          # Disable Up/Down arrow key stepping
-    def wheelEvent(self, event): event.ignore()  # Disable mouse scroll
+    def stepBy(self, steps):
+        pass
+
+    def wheelEvent(self, event):
+        event.ignore()
 
 
 class IKFKPanel(QtWidgets.QWidget):
     def __init__(self, main_window):
         super().__init__()
         self.mw = main_window
-        self._joint_order = []
-        
-        # Animation state
-        self._anim_timer = QtCore.QTimer()
-        self._anim_timer.timeout.connect(self._on_anim_tick)
-        self._target_angles = []
-        self._current_angles = []
-        
+        self._fk_rows = []
+        self._fk_target_by_joint = {}
+        self._anim_timer = self.mw._anim_timer
         self.init_ui()
 
     def init_ui(self):
-        root = QtWidgets.QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
-        root.setSpacing(10)
-
-        content_scroll = QtWidgets.QScrollArea()
-        content_scroll.setWidgetResizable(True)
-        content_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
-        root.addWidget(content_scroll, 3)
+        main_root = QtWidgets.QVBoxLayout(self)
+        main_root.setContentsMargins(0, 0, 0, 0)
+        
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+        main_root.addWidget(scroll)
 
         content = QtWidgets.QWidget()
-        content_layout = QtWidgets.QVBoxLayout(content)
-        content_layout.setAlignment(QtCore.Qt.AlignTop)
-        content_layout.setSpacing(12)
-        content_scroll.setWidget(content)
+        content.setStyleSheet("background-color: transparent;")
+        root = QtWidgets.QVBoxLayout(content)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(20)
+        scroll.setWidget(content)
 
-        title = QtWidgets.QLabel("IK and FK")
-        title.setStyleSheet("color: #1565c0; font-size: 24px; font-weight: 700; padding: 4px 6px;")
-        content_layout.addWidget(title)
+        # --- SECTION: INVERSE KINEMATICS ---
+        ik_section = QtWidgets.QVBoxLayout()
+        ik_section.setSpacing(15)
+        root.addLayout(ik_section)
 
-        subtitle = QtWidgets.QLabel("Inverse Kinematics and Forward Kinematics using the Standard DH convention as specified in Lab Manual BE04041011 (L.D. College of Engineering).")
-        subtitle.setWordWrap(True)
-        subtitle.setStyleSheet("color: #546e7a; font-size: 14px; font-weight: 500; line-height: 1.4; padding: 0 6px 8px 6px;")
-        content_layout.addWidget(subtitle)
+        # Main horizontal container for IK Controls and Info
+        ik_main_h = QtWidgets.QHBoxLayout()
+        ik_main_h.setSpacing(15)
+        ik_section.addLayout(ik_main_h)
 
+        # Left Column: IK Controls
+        ik_controls = QtWidgets.QVBoxLayout()
+        ik_controls.setSpacing(12)
+        ik_main_h.addLayout(ik_controls)
+        ik_main_h.addStretch()
 
-        self.ik_group = QtWidgets.QFrame()
-        self.ik_group.setStyleSheet(
-            "QFrame { background: #ffffff; border: 1px solid #dbe6ee; border-radius: 10px; }"
-        )
-        ik_layout = QtWidgets.QVBoxLayout(self.ik_group)
-        ik_layout.setContentsMargins(12, 12, 12, 12)
-        ik_layout.setSpacing(10)
+        ik_title = QtWidgets.QLabel("Inverse Kinematics")
+        ik_title.setStyleSheet("color: #1976d2; font-size: 20px; font-weight: bold;")
+        ik_controls.addWidget(ik_title)
 
-        ik_header = QtWidgets.QLabel("Inverse Kinematics")
-        ik_header.setStyleSheet("color: #1976d2; font-size: 19px; font-weight: bold;")
-        ik_layout.addWidget(ik_header)
-
-        target_row = QtWidgets.QHBoxLayout()
-        self.ik_x = self._make_num_input(-99999, 99999, 0.0, 3)
-        self.ik_y = self._make_num_input(-99999, 99999, 0.0, 3)
-        self.ik_z = self._make_num_input(-99999, 99999, 0.0, 3)
-        target_row.addWidget(self._labeled_widget("Target X", self.ik_x))
-        target_row.addWidget(self._labeled_widget("Target Y", self.ik_y))
-        target_row.addWidget(self._labeled_widget("Target Z", self.ik_z))
-        ik_layout.addLayout(target_row)
-
-        solver_row = QtWidgets.QHBoxLayout()
-        self.solve_ik_btn = QtWidgets.QPushButton("Solve IK")
-        self.solve_ik_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.solve_ik_btn.setStyleSheet(self._primary_btn_style())
-        self.solve_ik_btn.clicked.connect(self.solve_ik)
-        solver_row.addStretch()
-        solver_row.addWidget(self.solve_ik_btn)
-
-        self.solve_smart_btn = QtWidgets.QPushButton("🚀 Smart Solve (CCD)")
-        self.solve_smart_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.solve_smart_btn.setStyleSheet("""
-            QPushButton {
-                background-color: #43a047;
-                color: white;
-                border: none;
-                border-radius: 8px;
-                padding: 8px 14px;
-                font-size: 14px;
-                font-weight: 700;
+        # IK Input Group (x=, y=, z=)
+        input_container = QtWidgets.QFrame()
+        input_container.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border: 2px solid #e0e0e0;
+                border-radius: 12px;
             }
-            QPushButton:hover { background-color: #2e7d32; }
         """)
-        self.solve_smart_btn.clicked.connect(self.solve_ik_smart)
-        solver_row.addWidget(self.solve_smart_btn)
-        ik_layout.addLayout(solver_row)
+        input_layout = QtWidgets.QHBoxLayout(input_container)
+        input_layout.setContentsMargins(5, 5, 5, 5)
+        input_layout.setSpacing(0)
 
-        content_layout.addWidget(self.ik_group)
+        self.ik_x = self._make_num_input_minimal(-99999, 99999, 0.0)
+        self.ik_y = self._make_num_input_minimal(-99999, 99999, 0.0)
+        self.ik_z = self._make_num_input_minimal(-99999, 99999, 0.0)
 
-        self.fk_group = QtWidgets.QFrame()
-        self.fk_group.setStyleSheet(
-            "QFrame { background: #ffffff; border: 1px solid #dbe6ee; border-radius: 10px; }"
-        )
-        fk_layout = QtWidgets.QVBoxLayout(self.fk_group)
-        fk_layout.setContentsMargins(12, 12, 12, 12)
-        fk_layout.setSpacing(10)
+        input_layout.addWidget(self._labeled_widget_minimal("x=", self.ik_x))
+        input_layout.addWidget(self._v_line())
+        input_layout.addWidget(self._labeled_widget_minimal("y=", self.ik_y))
+        input_layout.addWidget(self._v_line())
+        input_layout.addWidget(self._labeled_widget_minimal("z=", self.ik_z))
+        ik_controls.addWidget(input_container)
 
-        fk_header = QtWidgets.QLabel("Forward Kinematics (Standard DH)")
-        fk_header.setStyleSheet("color: #1976d2; font-size: 19px; font-weight: bold;")
-        fk_layout.addWidget(fk_header)
+        # Solve IK Button
+        self.solve_ik_btn = QtWidgets.QPushButton("solve ik")
+        self.solve_ik_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.solve_ik_btn.setFixedHeight(50)
+        self.solve_ik_btn.setStyleSheet(self._btn_style("#424242"))
+        self.solve_ik_btn.clicked.connect(self.solve_ik)
+        ik_controls.addWidget(self.solve_ik_btn)
 
-        tool_row = QtWidgets.QHBoxLayout()
-        
-        self.run_fk_btn = QtWidgets.QPushButton("🔄 Compute FK")
-        self.run_fk_btn.setStyleSheet(self._primary_btn_style())
-        self.run_fk_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.run_fk_btn.clicked.connect(self.update_display)
-        tool_row.addWidget(self.run_fk_btn)
+        # --- SECTION: FORWARD KINEMATICS ---
+        fk_section = QtWidgets.QVBoxLayout()
+        fk_section.setSpacing(12)
+        root.addLayout(fk_section)
 
-        self.clear_dh_btn = QtWidgets.QPushButton("🗑️ Clear")
-        self.clear_dh_btn.setStyleSheet(self._ghost_btn_style())
-        self.clear_dh_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.clear_dh_btn.clicked.connect(self.clear_dh_table)
-        tool_row.addWidget(self.clear_dh_btn)
+        fk_title = QtWidgets.QLabel("Forward Kinematics")
+        fk_title.setStyleSheet("color: #2e7d32; font-size: 20px; font-weight: bold; margin-top: 10px;")
+        fk_section.addWidget(fk_title)
 
-        tool_row.addStretch()
-        fk_layout.addLayout(tool_row)
-
-        self.dh_table = QtWidgets.QTableWidget(0, 2)
-        self.dh_table.setHorizontalHeaderLabels(["Joint", "theta (deg)"])
+        # Joint Table
+        self.dh_table = QtWidgets.QTableWidget(0, 3)
+        self.dh_table.setHorizontalHeaderLabels(["Joint", "current", "target"])
         self.dh_table.verticalHeader().setVisible(False)
-        self.dh_table.setAlternatingRowColors(True)
-        self.dh_table.setStyleSheet(
-            """
+        self.dh_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
+        self.dh_table.setFixedHeight(200)
+        self.dh_table.setStyleSheet("""
             QTableWidget {
-                background: #ffffff;
-                color: #102a43;
-                border: 1px solid #dbe6ee;
-                border-radius: 8px;
+                background-color: white;
+                border: 2px solid #e0e0e0;
+                border-radius: 12px;
+                gridline-color: #f0f0f0;
                 font-size: 14px;
-                gridline-color: #e3edf5;
             }
             QHeaderView::section {
-                background: #f0f6fb;
-                color: #1e3a5f;
-                font-size: 14px;
-                font-weight: 700;
-                border: none;
-                border-bottom: 1px solid #dbe6ee;
+                background-color: #f5f5f5;
                 padding: 8px;
+                border: none;
+                border-bottom: 2px solid #e0e0e0;
+                font-weight: bold;
+                color: #616161;
             }
-            """
-        )
-        self.dh_table.horizontalHeader().setStretchLastSection(False)
-        self.dh_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Stretch)
-        fk_layout.addWidget(self.dh_table)
+        """)
+        fk_section.addWidget(self.dh_table)
 
-        self.result_view = QtWidgets.QTextEdit()
-        self.result_view.setReadOnly(True)
-        self.result_view.setMinimumHeight(220)
-        self.result_view.setStyleSheet(
-            """
-            QTextEdit {
-                background: #ffffff;
-                color: #0f172a;
-                border: 1px solid #dbe6ee;
-                border-radius: 8px;
-                font-size: 14px;
-                padding: 10px;
-            }
-            """
-        )
-        fk_layout.addWidget(self.result_view)
+        # Solve FK Button
+        self.run_fk_btn = QtWidgets.QPushButton("solve fk")
+        self.run_fk_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.run_fk_btn.setFixedHeight(50)
+        self.run_fk_btn.setStyleSheet(self._btn_style("#2e7d32"))
+        self.run_fk_btn.clicked.connect(self.solve_fk)
+        fk_section.addWidget(self.run_fk_btn)
 
-        dh_mats_row = QtWidgets.QHBoxLayout()
-        dh_mats_label = QtWidgets.QLabel("DH Matrices for Joints")
-        dh_mats_label.setStyleSheet("color: #1976d2; font-size: 17px; font-weight: 700;")
-        dh_mats_row.addWidget(dh_mats_label)
-        dh_mats_row.addStretch()
+        # Key Point Button (Using XYZ from IK tabs)
+        self.key_btn = QtWidgets.QPushButton("Key")
+        self.key_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.key_btn.setFixedHeight(50)
+        self.key_btn.setStyleSheet(self._btn_style("#1976d2"))
+        self.key_btn.setToolTip("Take X,Y,Z from IK tabs, mark the point, and go to it")
+        self.key_btn.clicked.connect(self.key_to_ik_point)
+        fk_section.addWidget(self.key_btn)
 
-        self.compute_dh_mats_btn = QtWidgets.QPushButton("Compute DH Matrices")
-        self.compute_dh_mats_btn.setStyleSheet(self._ghost_btn_style())
-        self.compute_dh_mats_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.compute_dh_mats_btn.clicked.connect(self.compute_dh_matrices)
-        dh_mats_row.addWidget(self.compute_dh_mats_btn)
-        fk_layout.addLayout(dh_mats_row)
-
-        self.dh_matrices_view = QtWidgets.QTextEdit()
-        self.dh_matrices_view.setReadOnly(True)
-        self.dh_matrices_view.setMinimumHeight(220)
-        self.dh_matrices_view.setStyleSheet(
-            """
-            QTextEdit {
-                background: #ffffff;
-                color: #0f172a;
-                border: 1px solid #dbe6ee;
-                border-radius: 8px;
-                font-size: 14px;
-                padding: 10px;
-            }
-            """
-        )
-        fk_layout.addWidget(self.dh_matrices_view)
-
-        content_layout.addWidget(self.fk_group)
-
+        root.addStretch()
         self.rebuild_dh_table()
-        self.update_display()
-        self.compute_dh_matrices()
+
+    def _btn_style(self, color):
+        return f"""
+            QPushButton {{
+                background-color: white;
+                color: {color};
+                border: 2px solid #e0e0e0;
+                border-radius: 12px;
+                font-size: 18px;
+                font-weight: 500;
+            }}
+            QPushButton:hover {{
+                background-color: #f5f5f5;
+                border-color: #bdbdbd;
+            }}
+            QPushButton:pressed {{
+                background-color: #eeeeee;
+                padding-top: 2px;
+            }}
+            QPushButton:disabled {{
+                color: #bdbdbd;
+                background-color: #fafafa;
+            }}
+        """
+
+    def _make_num_input_minimal(self, lo, hi, val):
+        spin = KeyboardOnlyDoubleSpinBox()
+        spin.setRange(lo, hi)
+        spin.setDecimals(2)
+        spin.setValue(val)
+        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        spin.setStyleSheet("""
+            QDoubleSpinBox {
+                background: transparent;
+                color: #424242;
+                border: none;
+                padding: 8px;
+                font-size: 16px;
+                font-weight: 500;
+            }
+        """)
+        return spin
+
+    def _labeled_widget_minimal(self, text, widget):
+        frame = QtWidgets.QWidget()
+        lay = QtWidgets.QHBoxLayout(frame)
+        lay.setContentsMargins(10, 0, 10, 0)
+        lay.setSpacing(2)
+        lbl = QtWidgets.QLabel(text)
+        lbl.setStyleSheet("color: #424242; font-size: 16px; font-weight: 500;")
+        lay.addWidget(lbl)
+        lay.addWidget(widget)
+        return frame
+
+    def _v_line(self):
+        line = QtWidgets.QFrame()
+        line.setFrameShape(QtWidgets.QFrame.VLine)
+        line.setFrameShadow(QtWidgets.QFrame.Plain)
+        line.setStyleSheet("color: #e0e0e0; background-color: #e0e0e0;")
+        line.setFixedWidth(2)
+        return line
+
+
+    def _make_num_input(self, lo, hi, val, decimals):
+        spin = KeyboardOnlyDoubleSpinBox()
+        spin.setRange(lo, hi)
+        spin.setDecimals(decimals)
+        spin.setValue(val)
+        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        spin.setStyleSheet(
+            "QDoubleSpinBox { background:#ffffff; color:#1565c0; border:1px solid #90caf9; border-radius:6px; "
+            "padding:6px 8px; font-size:15px; font-weight:700; }"
+        )
+        return spin
 
     def _labeled_widget(self, text, widget):
         frame = QtWidgets.QFrame()
-        frame.setStyleSheet("QFrame { background: transparent; border: none; }")
-        lay = QtWidgets.QVBoxLayout(frame)
+        lay = QtWidgets.QHBoxLayout(frame)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(4)
         lbl = QtWidgets.QLabel(text)
@@ -219,416 +225,231 @@ class IKFKPanel(QtWidgets.QWidget):
         lay.addWidget(widget)
         return frame
 
-    def _make_num_input(self, lo, hi, val, decimals):
-        spin = KeyboardOnlyDoubleSpinBox()
-        spin.setRange(lo, hi)
-        spin.setDecimals(decimals)
-        spin.setValue(val)
-        spin.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
-        spin.setStyleSheet(self._spin_style())
-        return spin
-
-    def _spin_style(self):
-        return (
-            "QDoubleSpinBox, QSpinBox {"
-            " background: #ffffff;"
-            " color: #1565c0;"
-            " border: 1px solid #90caf9;"
-            " border-radius: 6px;"
-            " padding: 6px 8px;"
-            " font-size: 15px;"
-            " font-weight: 700;"
-            "}"
-        )
-
     def _primary_btn_style(self):
         return (
-            "QPushButton {"
-            " background-color: #1976d2;"
-            " color: white;"
-            " border: none;"
-            " border-radius: 8px;"
-            " padding: 8px 14px;"
-            " font-size: 14px;"
-            " font-weight: 700;"
-            "}"
-            "QPushButton:hover { background-color: #1565c0; }"
+            "QPushButton { background-color:#1976d2; color:white; border:none; border-radius:8px; padding:8px 14px; font-size:14px; font-weight:700; }"
+            "QPushButton:hover { background-color:#1565c0; }"
         )
 
-    def _ghost_btn_style(self):
-        return (
-            "QPushButton {"
-            " background-color: #ffffff;"
-            " color: #1976d2;"
-            " border: 1px solid #90caf9;"
-            " border-radius: 8px;"
-            " padding: 8px 14px;"
-            " font-size: 14px;"
-            " font-weight: 700;"
-            "}"
-            "QPushButton:hover { background-color: #e3f2fd; }"
-        )
+    def _get_tcp_link(self):
+        robot = getattr(self.mw, "robot", None)
+        if robot is None:
+            return None
 
-    def _active_joint_child_names(self):
-        joint_tab = getattr(self.mw, "joint_tab", None)
-        if joint_tab is None:
+        def chain_len(link):
+            if link is None:
+                return -1
+            return len(robot.get_kinematic_chain(link))
+
+        custom_tcp = getattr(self.mw, "custom_tcp_name", None)
+        if custom_tcp and custom_tcp in robot.links:
+            return robot.links[custom_tcp]
+
+        tcp_candidates = [
+            link for link in robot.links.values()
+            if getattr(link, "custom_tcp_offset", None) is not None
+        ]
+        if tcp_candidates:
+            return max(tcp_candidates, key=chain_len)
+
+        gripper_candidates = [
+            joint.child_link for joint in robot.joints.values()
+            if getattr(joint, "is_gripper", False) and joint.child_link is not None
+        ]
+        if gripper_candidates:
+            return max(gripper_candidates, key=chain_len)
+
+        leaf_candidates = [
+            link for link in robot.links.values()
+            if link.parent_joint is not None and not link.child_joints
+        ]
+        if leaf_candidates:
+            return max(leaf_candidates, key=chain_len)
+
+        non_base = [link for link in robot.links.values() if not getattr(link, "is_base", False)]
+        if non_base:
+            return max(non_base, key=chain_len)
+
+        links = list(robot.links.values())
+        return max(links, key=chain_len) if links else None
+
+    def _visible_master_joints(self):
+        robot = getattr(self.mw, "robot", None)
+        if robot is None:
             return []
 
-        joint_data = getattr(joint_tab, "joints", {})
-        result = []
-        for child_name, data in joint_data.items():
-            joint_id = data.get("joint_id", child_name)
-            is_slave = False
-            for _, slaves in self.mw.robot.joint_relations.items():
-                if any(s_id == joint_id for s_id, _ in slaves):
-                    is_slave = True
-                    break
-            if not is_slave:
-                result.append(child_name)
-        return result
-
-    def rebuild_dh_table(self):
         joint_tab = getattr(self.mw, "joint_tab", None)
         joint_data = getattr(joint_tab, "joints", {}) if joint_tab is not None else {}
+        ordered = []
+        seen = set()
 
-        prev = {}
-        for r in range(self.dh_table.rowCount()):
-            j_name = self.dh_table.item(r, 0).text() if self.dh_table.item(r, 0) else f"J{r+1}"
-            prev[j_name] = self._table_num(r, 1, 0.0)
+        for child_name, data in joint_data.items():
+            joint_id = data.get("joint_id", child_name)
+            joint = robot.joints.get(joint_id)
+            if joint is None:
+                continue
+            is_slave = any(
+                any(slave_id == joint_id for slave_id, _ in slaves)
+                for _, slaves in robot.joint_relations.items()
+            )
+            if is_slave or joint_id in seen:
+                continue
+            ordered.append((child_name, joint))
+            seen.add(joint_id)
 
-        self._joint_order = self._active_joint_child_names()
-        if not self._joint_order:
-            self._joint_order = [f"J{i+1}" for i in range(max(1, self.dh_table.rowCount()))]
+        for joint_id, joint in robot.joints.items():
+            if joint_id in seen:
+                continue
+            is_slave = any(
+                any(slave_id == joint_id for slave_id, _ in slaves)
+                for _, slaves in robot.joint_relations.items()
+            )
+            if is_slave:
+                continue
+            child_name = joint.child_link.name if joint.child_link is not None else joint_id
+            ordered.append((child_name, joint))
+            seen.add(joint_id)
 
-        self.dh_table.setRowCount(len(self._joint_order))
-        for idx, child_name in enumerate(self._joint_order):
-            display = child_name
-            if child_name in joint_data:
-                display = joint_data[child_name].get("custom_name", child_name)
+        return ordered
 
-            name_item = QtWidgets.QTableWidgetItem(display)
+    def rebuild_dh_table(self):
+        visible_joints = self._visible_master_joints()
+        self._fk_rows = []
+        self.dh_table.setRowCount(len(visible_joints))
+        
+        for idx, (child_name, joint) in enumerate(visible_joints):
+            # Name
+            name_item = QtWidgets.QTableWidgetItem(child_name)
             name_item.setFlags(name_item.flags() & ~QtCore.Qt.ItemIsEditable)
+            name_item.setTextAlignment(QtCore.Qt.AlignCenter)
             self.dh_table.setItem(idx, 0, name_item)
 
-            theta = prev.get(display, 0.0)
-            self.dh_table.setItem(idx, 1, QtWidgets.QTableWidgetItem(f"{theta:.4f}"))
+            # Current
+            curr_item = QtWidgets.QTableWidgetItem(f"{float(joint.current_value):.2f}")
+            curr_item.setFlags(curr_item.flags() & ~QtCore.Qt.ItemIsEditable)
+            curr_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.dh_table.setItem(idx, 1, curr_item)
 
-        self.load_joint_angles_into_dh()
+            # Target
+            target_val = self._fk_target_by_joint.get(joint.name, float(joint.current_value))
+            target_item = QtWidgets.QTableWidgetItem(f"{target_val:.2f}")
+            target_item.setTextAlignment(QtCore.Qt.AlignCenter)
+            self.dh_table.setItem(idx, 2, target_item)
+
+            self._fk_rows.append({
+                "joint_id": joint.name,
+                "child_name": child_name
+            })
+
+        self.run_fk_btn.setEnabled(len(visible_joints) > 0)
 
     def _table_num(self, row, col, default):
         item = self.dh_table.item(row, col)
-        if not item:
-            return default
+        if not item: return default
         try:
             return float(item.text())
-        except Exception:
+        except:
             return default
 
-    def load_joint_angles_into_dh(self):
-        joint_tab = getattr(self.mw, "joint_tab", None)
-        if joint_tab is None:
-            return
-
-        if not self._joint_order:
-            return
-
-        for idx, child_name in enumerate(self._joint_order):
-            if child_name not in joint_tab.joints:
-                continue
-            theta = joint_tab.joints[child_name].get("current_angle", 0.0)
-            self.dh_table.setItem(idx, 1, QtWidgets.QTableWidgetItem(f"{theta:.4f}"))
-
-    def _dh_rows(self):
-        rows = []
-        for r in range(self.dh_table.rowCount()):
-            theta_deg = self._table_num(r, 1, 0.0)
-            rows.append(theta_deg)
-        return rows
-
-    def _a_matrix(self, theta_rad, d, a, alpha_rad):
-        """
-        Transformation matrix A_i from frame i-1 to frame i.
-        Basis: BE04041011 Lab Manual (Standard DH convention).
-        Formula: A_i = RotZ(theta_i) * TransZ(d_i) * TransX(a_i-1) * RotX(alpha_i-1)
-        
-        Resulting Matrix Structure (Perfected as per PDF page 34):
-        [ cos(θ)  -sin(θ)cos(α)   sin(θ)sin(α)   a*cos(θ) ]
-        [ sin(θ)   cos(θ)cos(α)  -cos(θ)sin(α)   a*sin(θ) ]
-        [   0        sin(α)          cos(α)         d     ]
-        [   0          0              0             1     ]
-        """
-        ct, st = np.cos(theta_rad), np.sin(theta_rad)
-        ca, sa = np.cos(alpha_rad), np.sin(alpha_rad)
-        return np.array(
-            [
-                [ct, -st * ca, st * sa, a * ct],
-                [st, ct * ca, -ct * sa, a * st],
-                [0.0, sa, ca, d],
-                [0.0, 0.0, 0.0, 1.0],
-            ],
-            dtype=float,
-        )
-
-    def _fk_with_thetas_rad(self, thetas_rad):
-        T = np.eye(4)
-        chain = []
-        for theta in thetas_rad:
-            A = self._a_matrix(theta, 0.0, 0.0, 0.0)
-            T = T @ A
-            chain.append(T.copy())
-        return T, chain
-
+    def _sync_fk_current_angle(self, joint_id, angle_deg):
+        for row_idx, row_data in enumerate(self._fk_rows):
+            if row_data.get("joint_id") == joint_id:
+                curr_item = self.dh_table.item(row_idx, 1)
+                if curr_item:
+                    curr_item.setText(f"{float(angle_deg):.2f}")
+                break
     def update_display(self):
-        rows = self._dh_rows()
-        if not rows:
-            self.result_view.setHtml("<p style='color:#78909c;'>No DH rows configured.</p>")
-            self.compute_dh_matrices()
-            return
-
-        theta_rad = np.array([np.radians(theta) for theta in rows], dtype=float)
-        T, chain = self._fk_with_thetas_rad(theta_rad)
-
-        html = """
-        <style>
-            .box { border: 1px solid #dbe6ee; border-radius: 10px; margin: 10px 0; overflow: hidden; }
-            .head { background: #1976d2; color: #fff; font-weight: 700; font-size: 16px; padding: 10px 12px; }
-            .matrix { width: 100%; border-collapse: collapse; }
-            .matrix td, .matrix th { text-align: center; padding: 8px; font-family: Consolas, monospace; font-size: 14px; }
-            .matrix th { background: #f2f7fb; color: #334e68; }
-            .matrix tr:nth-child(even) td { background: #fafcfe; }
-        </style>
-        """
-
-        for i, Ti in enumerate(chain):
-            html += f"<div class='box'><div class='head'>T0{i+1}</div>{self._matrix_html(Ti)}</div>"
-
-        html += f"<div class='box'><div class='head'>End-Effector Pose</div>{self._matrix_html(T)}</div>"
-        p = T[:3, 3]
-        html += (
-            f"<p style='font-size:15px;color:#0f172a;'><b>Position:</b> "
-            f"X={p[0]:.4f}, Y={p[1]:.4f}, Z={p[2]:.4f}</p>"
-        )
-
-        self.result_view.setHtml(html)
-        self.compute_dh_matrices()
-
-    def _matrix_html(self, mat):
-        labels = ["X", "Y", "Z", "T"]
-        s = "<table class='matrix'><tr>"
-        for lbl in labels:
-            s += f"<th>{lbl}</th>"
-        s += "</tr>"
-        for row in mat:
-            s += "<tr>"
-            for val in row:
-                s += f"<td>{val: .5f}</td>"
-            s += "</tr>"
-        s += "</table>"
-        return s
-
-    def compute_dh_matrices(self):
-        rows = self._dh_rows()
-        if not rows:
-            self.dh_matrices_view.setHtml("<p style='color:#78909c;'>No joint DH rows configured.</p>")
-            return
-
-        html = """
-        <style>
-            .box { border: 1px solid #dbe6ee; border-radius: 10px; margin: 10px 0; overflow: hidden; }
-            .head { background: #1976d2; color: #fff; font-weight: 700; font-size: 16px; padding: 10px 12px; }
-            .matrix { width: 100%; border-collapse: collapse; }
-            .matrix td, .matrix th { text-align: center; padding: 8px; font-family: Consolas, monospace; font-size: 14px; }
-            .matrix th { background: #f2f7fb; color: #334e68; }
-            .matrix tr:nth-child(even) td { background: #fafcfe; }
-        </style>
-        """
-
-        for idx, theta_deg in enumerate(rows):
-            theta_rad = np.radians(theta_deg)
-            Ai = self._a_matrix(theta_rad, 0.0, 0.0, 0.0)
-
-            joint_name = f"J{idx + 1}"
-            if idx < self.dh_table.rowCount() and self.dh_table.item(idx, 0):
-                joint_name = self.dh_table.item(idx, 0).text()
-
-            html += f"<div class='box'><div class='head'>A{idx+1} ({joint_name})</div>{self._matrix_html(Ai)}</div>"
-
-        self.dh_matrices_view.setHtml(html)
+        self.rebuild_dh_table()
 
     def solve_ik(self):
-        """Solves IK using the Jacobian-based numerical method (DH-centric)."""
-        rows = self._dh_rows()
-        n = len(rows)
-        if n == 0:
-            QtWidgets.QMessageBox.warning(self, "IK", "Please configure DH rows first.")
+        """Solves IK based on target XYZ, marks it with a black dot, and animates."""
+        if self.mw._anim_timer.isActive():
+            self.mw.log("⏳ IK Solve requested while animation is active. Ignoring.")
             return
 
-        target = np.array([self.ik_x.value(), self.ik_y.value(), self.ik_z.value()], dtype=float)
-        tol = 0.1
-        max_iters = 350
-
-        theta = np.array([np.radians(v) for v in rows], dtype=float)
-        lam = 1e-2
-        eps = 1e-5
-
-        def pos_of(th):
-            joint_tab = getattr(self.mw, "joint_tab", None)
-            if not joint_tab or not joint_tab.joints:
-                T, _ = self._fk_with_thetas_rad(th)
-                return T[:3, 3]
-                
-            old_angles = {n: j.current_value for n, j in self.mw.robot.joints.items()}
-            
-            for i, child_name in enumerate(self._joint_order):
-                if child_name in self.mw.robot.joints:
-                    val_deg = np.degrees(th[i])
-                    self.mw.robot.joints[child_name].current_value = val_deg
-                    if child_name in self.mw.robot.joint_relations:
-                        for s_id, ratio in self.mw.robot.joint_relations[child_name]:
-                            if s_id in self.mw.robot.joints:
-                                self.mw.robot.joints[s_id].current_value = val_deg * ratio
-
-            self.mw.robot.update_kinematics()
-            
-            links = list(self.mw.robot.links.values())
-            if not links:
-                pos = np.zeros(3)
-            else:
-                pos = links[-1].t_world[:3, 3]
-                
-            for n, val in old_angles.items():
-                self.mw.robot.joints[n].current_value = val
-            self.mw.robot.update_kinematics()
-            
-            return pos
-
-        converged = False
-        for _ in range(max_iters):
-            p = pos_of(theta)
-            err = target - p
-            if np.linalg.norm(err) <= tol:
-                converged = True
-                break
-
-            J = np.zeros((3, n), dtype=float)
-            for i in range(n):
-                tp = theta.copy(); tm = theta.copy()
-                tp[i] += eps; tm[i] -= eps
-                J[:, i] = (pos_of(tp) - pos_of(tm)) / (2.0 * eps)
-
-            jj_t = J @ J.T
-            step = J.T @ np.linalg.solve(jj_t + (lam * lam) * np.eye(3), err)
-            step = np.clip(step, -0.2, 0.2)
-            theta += step
-
-        theta_deg = np.degrees(theta)
-        self._start_ik_animation(theta_deg)
+        tx, ty, tz = self.ik_x.value(), self.ik_y.value(), self.ik_z.value()
+        target_cm = np.array([tx, ty, tz])
         
-        status = "converged" if converged else "best effort"
-        self.mw.log(f"DH IK: Solve {status} (Target: {target}).")
+        # --- Visual Feedback: Small Black Dot at Target ---
+        import pyvista as pv
+        dot = pv.Sphere(radius=0.5, center=target_cm)
+        self.mw.canvas.plotter.add_mesh(dot, color="black", name="ik_target_dot", pickable=False)
+        self.mw.canvas.plotter.render()
 
-    def solve_ik_smart(self):
-        """Solves IK using the Robot core's robust CCD solver (3D model-centric)."""
-        joint_tab = getattr(self.mw, "joint_tab", None)
-        if not joint_tab or not joint_tab.joints:
-             QtWidgets.QMessageBox.warning(self, "IK", "No joints created in the robot model yet.")
-             return
+        tcp_link = self._get_preferred_tcp_link()
+        if not tcp_link:
+            QtWidgets.QMessageBox.warning(self, "IK Error", "No suitable TCP (End Effector) found.")
+            return
 
-        # Find TCP link (usually the last child in the model)
+        self.mw.log(f"🎯 Solving IK for target: ({tx:.1f}, {ty:.1f}, {tz:.1f})")
+        
+        # Call the centralized IK mover in the main window
+        self.mw._move_tcp_to_xyz(tx, ty, tz, tcp_link)
+
+    def _get_preferred_tcp_link(self):
         links = list(self.mw.robot.links.values())
-        if not links: return
-        tcp_link = links[-1] 
-        
-        target = [self.ik_x.value(), self.ik_y.value(), self.ik_z.value()]
-        
-        # Snapshot current angles
-        old_angles = {n: j.current_value for n, j in self.mw.robot.joints.items()}
-        
-        # Use robust CCD solver
-        success = self.mw.robot.inverse_kinematics(target, tcp_link, max_iters=300, tolerance=0.5)
-        
-        if success:
-            new_angles_deg = [self.mw.robot.joints[jn].current_value for jn in self._joint_order]
-            # Reset to animate properly
-            for n, val in old_angles.items():
-                self.mw.robot.joints[n].current_value = val
-            self.mw.robot.update_kinematics()
+        if not links: return None
+
+        def chain_len(link):
+            return len(self.mw.robot.get_kinematic_chain(link))
+
+        # 1. Custom TCP
+        tcp_candidates = [l for l in links if getattr(l, "custom_tcp_offset", None) is not None]
+        if tcp_candidates: return max(tcp_candidates, key=chain_len)
+
+        # 2. Gripper
+        gripper_candidates = [j.child_link for j in self.mw.robot.joints.values() if getattr(j, "is_gripper", False)]
+        if gripper_candidates: return max(gripper_candidates, key=chain_len)
+
+        # 3. Leaf nodes
+        leaf_candidates = [l for l in links if not l.child_joints]
+        if leaf_candidates: return max(leaf_candidates, key=chain_len)
+
+        return max(links, key=chain_len)
+
+    def solve_fk(self):
+        if self.mw._anim_timer.isActive() or not self._fk_rows:
+            return
+
+        joint_ids, child_names, targets = [], [], []
+        for idx, row in enumerate(self._fk_rows):
+            joint = self.mw.robot.joints.get(row["joint_id"])
+            if not joint: continue
             
-            self._start_ik_animation(new_angles_deg)
-            self.mw.log(f"Smart IK: Target {target} reached.")
-        else:
-            self.mw.log(f"Smart IK: Failed to reach target {target}.")
-            QtWidgets.QMessageBox.information(self, "IK", "Target might be out of reachable workspace.")
-
-    def _start_ik_animation(self, target_deg_list):
-        self._target_angles = list(target_deg_list)
-        self._current_angles = []
-        for i, child_name in enumerate(self._joint_order):
-            joint_tab = getattr(self.mw, "joint_tab", None)
-            curr = 0.0
-            if joint_tab and child_name in joint_tab.joints:
-                curr = joint_tab.joints[child_name].get("current_angle", 0.0)
-            self._current_angles.append(curr)
-        
-        self._anim_timer.start(30)
-
-    def _on_anim_tick(self):
-        done = True
-        step_size = 2.0 # degrees per tick
-        
-        for i, child_name in enumerate(self._joint_order):
-            curr = self._current_angles[i]
-            target = self._target_angles[i]
+            val = self._table_num(idx, 2, joint.current_value)
+            val = float(np.clip(val, joint.min_limit, joint.max_limit))
+            self._fk_target_by_joint[joint.name] = val
             
-            if abs(target - curr) < step_size:
-                self._current_angles[i] = target
-            else:
-                self._current_angles[i] += np.sign(target - curr) * step_size
-                done = False
-                
-            self.apply_rotation(child_name, self._current_angles[i])
-            self.sync_slider(child_name, self._current_angles[i])
+            joint_ids.append(joint.name)
+            child_names.append(row["child_name"])
+            targets.append(val)
 
-        if done:
-            self._anim_timer.stop()
-            self.update_display()
-            self.mw.show_toast("Target Reached", "success")
+        if joint_ids:
+            self.mw._start_joint_animation(joint_ids, child_names, targets)
+
+    def key_to_ik_point(self):
+        """Creates a visual target point and solves IK in one step."""
+        # 1. Get Target from IK tabs
+        tx, ty, tz = self.ik_x.value(), self.ik_y.value(), self.ik_z.value()
+        target = np.array([tx, ty, tz])
+        
+        # 2. Visualize the point in 3D (Marker)
+        import pyvista as pv
+        marker = pv.Sphere(radius=1.5, center=target)
+        self.mw.canvas.plotter.add_mesh(marker, color="#ff5722", name="ik_key_target", pickable=False)
+        self.mw.canvas.plotter.render()
+        
+        self.mw.log(f"📍 Keying point: ({tx:.1f}, {ty:.1f}, {tz:.1f})")
+        
+        # 3. Solve IK and move
+        self.solve_ik()
 
     def refresh_sliders(self):
-        # Joint rotation controls were removed from this panel by UI request.
-        # Keep this method for compatibility with existing callers.
-        return
-
-    def on_slider_move(self, child_name, value, spinbox):
-        spinbox.blockSignals(True)
-        spinbox.setValue(value)
-        spinbox.blockSignals(False)
-        self.apply_rotation(child_name, value)
-
-    def on_spin_move(self, child_name, value, slider):
-        slider.blockSignals(True)
-        slider.setValue(int(value * 10))
-        slider.blockSignals(False)
-        self.apply_rotation(child_name, value)
-
-    def apply_rotation(self, child_name, angle):
-        joint_tab = getattr(self.mw, "joint_tab", None)
-        if joint_tab is None or child_name not in joint_tab.joints:
-            return
-        joint_tab.apply_joint_rotation(child_name, angle)
-        if child_name in self._joint_order:
-            row = self._joint_order.index(child_name)
-            self.dh_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{angle:.4f}"))
-        self.update_display()
+        self.rebuild_dh_table()
 
     def sync_slider(self, child_name, value):
-        if child_name in self._joint_order:
-            row = self._joint_order.index(child_name)
-            self.dh_table.setItem(row, 1, QtWidgets.QTableWidgetItem(f"{value:.4f}"))
-        self.update_display()
-    def clear_dh_table(self):
-        for r in range(self.dh_table.rowCount()):
-            for c in range(1, 5):
-                self.dh_table.setItem(r, c, QtWidgets.QTableWidgetItem("0.0000"))
-        self.update_display()
-
+        joint_tab = getattr(self.mw, "joint_tab", None)
+        joint_id = child_name
+        if joint_tab and child_name in joint_tab.joints:
+            joint_id = joint_tab.joints[child_name].get("joint_id", child_name)
+        self._sync_fk_current_angle(joint_id, value)

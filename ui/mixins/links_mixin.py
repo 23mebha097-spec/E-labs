@@ -3,6 +3,66 @@ import numpy as np
 import os
 import random
 
+from core.import_units import (
+    SUPPORTED_LENGTH_UNITS,
+    UP_AXIS_OPTIONS,
+    detect_file_unit,
+    get_engine_internal_unit,
+    get_engine_units_per_cm,
+    rotation_matrix_for_up_axis,
+    unit_scale_to_internal,
+)
+
+
+class ImportOptionsDialog(QtWidgets.QDialog):
+    def __init__(self, parent, file_name, detected_unit=None, detected_source="", default_unit="mm", default_up_axis="preserve"):
+        super().__init__(parent)
+        self.setWindowTitle("Import Units")
+        self.setModal(True)
+        self.resize(420, 220)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        header = QtWidgets.QLabel(f"Import options for {file_name}")
+        header.setStyleSheet("font-size: 15px; font-weight: bold; color: #1976d2;")
+        layout.addWidget(header)
+
+        detected_text = detected_unit or "Not detected"
+        source_text = detected_source or "manual selection required"
+        info = QtWidgets.QLabel(
+            f"Detected unit: {detected_text}\nSource: {source_text}\nEngine internal unit: {get_engine_internal_unit()} (1 cm = {get_engine_units_per_cm():.0f} {get_engine_internal_unit()})"
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QtWidgets.QFormLayout()
+
+        self.unit_combo = QtWidgets.QComboBox()
+        self.unit_combo.addItems(list(SUPPORTED_LENGTH_UNITS))
+        self.unit_combo.setCurrentText(detected_unit or default_unit)
+        form.addRow("CAD unit", self.unit_combo)
+
+        self.axis_combo = QtWidgets.QComboBox()
+        self.axis_combo.addItems(list(UP_AXIS_OPTIONS))
+        self.axis_combo.setCurrentText(default_up_axis if default_up_axis in UP_AXIS_OPTIONS else "preserve")
+        form.addRow("Source up-axis", self.axis_combo)
+
+        layout.addLayout(form)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def selected_options(self):
+        return {
+            "unit": self.unit_combo.currentText(),
+            "up_axis": self.axis_combo.currentText(),
+        }
+
 
 class LinksMixin:
     """Methods for managing robot links: import, select, base, remove, color."""
@@ -67,12 +127,11 @@ class LinksMixin:
         btn_layout.addWidget(self.remove_btn)
         layout.addLayout(btn_layout)
 
-
         self.color_btn = QtWidgets.QPushButton("Change Color")
         self.color_btn.setCursor(QtCore.Qt.PointingHandCursor)
         self.color_btn.clicked.connect(self.change_color)
         layout.addWidget(self.color_btn)
-        
+
         layout.addStretch()
 
     def on_link_selected(self, item):
@@ -273,6 +332,182 @@ class LinksMixin:
         except Exception as e:
             self.log(f"Scale Error: {e}")
 
+    def _ask_import_options(self, file_path, detected_unit, detection_source):
+        suffix = os.path.splitext(file_path)[1].lower()
+        prefs = getattr(self, "import_preferences", {})
+        default_unit = prefs.get("last_stl_unit", "mm")
+        default_up_axis = prefs.get("last_up_axis", "preserve")
+
+        # STL has no dependable unit metadata, so always confirm it.
+        must_confirm = suffix == ".stl" or detected_unit is None
+        if not must_confirm:
+            return {
+                "unit": detected_unit,
+                "up_axis": default_up_axis,
+            }
+
+        dialog = ImportOptionsDialog(
+            self,
+            os.path.basename(file_path),
+            detected_unit=detected_unit,
+            detected_source=detection_source,
+            default_unit=detected_unit or default_unit,
+            default_up_axis=default_up_axis,
+        )
+        if dialog.exec_() != QtWidgets.QDialog.Accepted:
+            return None
+
+        selected = dialog.selected_options()
+        if suffix == ".stl":
+            prefs["last_stl_unit"] = selected["unit"]
+        prefs["last_up_axis"] = selected["up_axis"]
+        self.import_preferences = prefs
+        return selected
+
+    def _finalize_loaded_mesh(self, file_path, loaded):
+        if isinstance(loaded, tuple):
+            loaded = loaded[0]
+
+        if hasattr(loaded, "geometry") and not hasattr(loaded, "vertices"):
+            self.log("Detected assembly/scene. Merging meshes...")
+            mesh = loaded.to_mesh()
+        else:
+            mesh = loaded
+
+        if not hasattr(mesh, "vertices") or len(mesh.vertices) == 0:
+            raise ValueError("Imported mesh has 0 vertices")
+
+        return mesh.copy()
+
+    def _prepare_imported_mesh(self, file_path, mesh):
+        raw_bounds = np.array(mesh.bounds, dtype=float)
+        raw_size = raw_bounds[1] - raw_bounds[0]
+        detected_unit, detection_source = detect_file_unit(file_path, mesh)
+        import_options = self._ask_import_options(file_path, detected_unit, detection_source)
+        if import_options is None:
+            return None
+
+        source_unit = import_options["unit"]
+        up_axis = import_options["up_axis"]
+        scale_to_internal = unit_scale_to_internal(source_unit)
+
+        prepared_mesh = mesh.copy()
+
+        if abs(scale_to_internal - 1.0) > 1e-12:
+            prepared_mesh.apply_scale(scale_to_internal)
+
+        axis_rotation = rotation_matrix_for_up_axis(up_axis)
+        if not np.allclose(axis_rotation, np.eye(4)):
+            prepared_mesh.apply_transform(axis_rotation)
+
+        final_bounds = np.array(prepared_mesh.bounds, dtype=float)
+        final_size = final_bounds[1] - final_bounds[0]
+
+        debug = {
+            "source_unit": source_unit,
+            "detected_unit": detected_unit,
+            "detection_source": detection_source,
+            "scale_to_internal": scale_to_internal,
+            "up_axis": up_axis,
+            "raw_bounds": raw_bounds,
+            "raw_size": raw_size,
+            "final_bounds": final_bounds,
+            "final_size": final_size,
+            "engine_unit": get_engine_internal_unit(),
+        }
+        return prepared_mesh, debug
+
+    def _log_import_debug(self, name, debug):
+        final_cm = debug["final_size"] / get_engine_units_per_cm()
+        axis_label = "preserve native axes" if debug["up_axis"] == "preserve" else f"{debug['up_axis']}-up to z-up"
+
+        self.log(
+            f"[Import] {name}: source unit={debug['source_unit']} "
+            f"(detected={debug['detected_unit'] or 'manual'}, via {debug['detection_source']})"
+        )
+        self.log(
+            f"[Import] Scale factor to {debug['engine_unit']}: {debug['scale_to_internal']:.6f} "
+            f"applied uniformly on X/Y/Z"
+        )
+        self.log(f"[Import] Up-axis mapping: {axis_label}")
+        self.log(
+            f"[Import] Bounding box before scaling: "
+            f"{debug['raw_size'][0]:.3f} x {debug['raw_size'][1]:.3f} x {debug['raw_size'][2]:.3f} {debug['source_unit']}"
+        )
+        self.log(
+            f"[Import] Bounding box after scaling: "
+            f"{debug['final_size'][0]:.3f} x {debug['final_size'][1]:.3f} x {debug['final_size'][2]:.3f} mm "
+            f"({final_cm[0]:.3f} x {final_cm[1]:.3f} x {final_cm[2]:.3f} cm)"
+        )
+
+    def measure_selected_link(self):
+        item = self.links_list.currentItem()
+        name = item.text() if item else getattr(self.canvas, "selected_name", None)
+        if not name:
+            self.show_toast("Select a link first", "warning")
+            return
+        measurement = self.canvas.measure_actor_bounds(name)
+        if not measurement:
+            self.show_toast("Unable to measure selection", "error")
+            return
+
+        dims_internal = measurement["dims_internal"]
+        dims_cm = measurement["dims_cm"]
+        self.log(
+            f"[Measure] {name}: "
+            f"{dims_internal[0]:.3f} x {dims_internal[1]:.3f} x {dims_internal[2]:.3f} {measurement['internal_unit']} "
+            f"= {dims_cm[0]:.3f} x {dims_cm[1]:.3f} x {dims_cm[2]:.3f} cm"
+        )
+        self.show_toast(f"Measured {name}", "success")
+
+    def add_reference_cube(self):
+        import trimesh
+
+        mesh = trimesh.creation.box(extents=[100.0, 100.0, 100.0])
+        name = "reference_cube_100mm"
+        base_name = name
+        counter = 1
+        while name in self.robot.links:
+            name = f"{base_name}_{counter}"
+            counter += 1
+
+        link = self.robot.add_link(name, mesh)
+        link.color = "#1976d2"
+        link.import_metadata = {
+            "source_unit": "mm",
+            "detected_unit": "mm",
+            "detection_source": "generated reference cube",
+            "scale_to_internal": 1.0,
+            "up_axis": "z",
+            "engine_unit": get_engine_internal_unit(),
+            "source_path": None,
+            "raw_bounds": [[-50.0, -50.0, -50.0], [50.0, 50.0, 50.0]],
+            "final_bounds": [[-50.0, -50.0, -50.0], [50.0, 50.0, 50.0]],
+            "raw_size": [100.0, 100.0, 100.0],
+            "final_size": [100.0, 100.0, 100.0],
+        }
+
+        self.add_link_item(name)
+
+        t_import = np.eye(4)
+        t_import[:3, 3] = [50.0 * get_engine_units_per_cm(), 50.0 * get_engine_units_per_cm(), 50.0 * get_engine_units_per_cm()]
+        link.t_offset = t_import
+
+        self.canvas.update_link_mesh(name, mesh, t_import, color=link.color)
+        actor = self.canvas.actors[name]
+        self.canvas.ensure_grid_fits_bounds(actor.GetBounds())
+        self.canvas.select_actor(name)
+        for i in range(self.links_list.count()):
+            item = self.links_list.item(i)
+            if item and item.text() == name:
+                self.links_list.setCurrentItem(item)
+                break
+        self.canvas.focus_on_actor(name)
+        self.update_link_colors()
+
+        self.log("[Validation] Added reference cube with exact size 100.000 x 100.000 x 100.000 mm (10.000 cm)")
+        self.measure_selected_link()
+
     def import_mesh(self):
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Import Mesh", "", "3D Files (*.stl *.step *.stp *.obj)"
@@ -282,33 +517,13 @@ class LinksMixin:
             import trimesh
             try:
                 loaded = trimesh.load(file_path)
-                
-                # Handle Scenes (often returned by STEP/STEP files)
-                if isinstance(loaded, trimesh.Scene):
-                    self.log("Detected assembly/scene. Merging meshes...")
-                    mesh = loaded.to_mesh() 
-                else:
-                    mesh = loaded
+                mesh = self._finalize_loaded_mesh(file_path, loaded)
+                prepared = self._prepare_imported_mesh(file_path, mesh)
+                if prepared is None:
+                    self.log("Import cancelled.")
+                    return
+                mesh, import_debug = prepared
 
-                # VALIDATION: Check if mesh is empty
-                if not hasattr(mesh, 'vertices') or len(mesh.vertices) == 0:
-                     self.log("ERROR: Imported mesh has 0 vertices! The file might be empty or incompatible.")
-                     return
-
-                # IMPORT "AS IS" - No forced scale ratios
-                bounds = mesh.bounds
-                raw_size = bounds[1] - bounds[0]
-                max_dim = max(raw_size)
-                self.log(f"Original CAD Units: {raw_size[0]:.1f} x {raw_size[1]:.1f} x {raw_size[2]:.1f}")
-
-                # Automatic Unit Detection
-                if max_dim < 1.0:
-                    self.log(f"Auto-Detected: Unit appears to be METERS ({max_dim:.3f} units). Adjusting graph...")
-                    self.canvas.update_grid_scale(0.01)
-                elif max_dim > 150:
-                    self.log(f"Auto-Detected: Unit appears to be MILLIMETERS ({max_dim:.1f} units). Adjusting graph...")
-                    self.canvas.update_grid_scale(10.0)
-                
                 # Assign a random distinct color
                 colors = ["#e74c3c", "#3498db", "#2ecc71", "#f1c40f", "#9b59b6", "#1abc9c", "#e67e22", "#95a5a6"]
                 link_color = random.choice(colors)
@@ -324,6 +539,19 @@ class LinksMixin:
                 
                 link = self.robot.add_link(name, mesh)
                 link.color = link_color
+                link.import_metadata = {
+                    "source_unit": import_debug["source_unit"],
+                    "detected_unit": import_debug["detected_unit"],
+                    "detection_source": import_debug["detection_source"],
+                    "scale_to_internal": import_debug["scale_to_internal"],
+                    "up_axis": import_debug["up_axis"],
+                    "engine_unit": import_debug["engine_unit"],
+                    "source_path": file_path,
+                    "raw_size": import_debug["raw_size"].tolist(),
+                    "final_size": import_debug["final_size"].tolist(),
+                    "raw_bounds": import_debug["raw_bounds"].tolist(),
+                    "final_bounds": import_debug["final_bounds"].tolist(),
+                }
                 
                 # Tag as Simulation Object if imported in simulation mode
                 if hasattr(self, 'sim_toggle_btn') and self.sim_toggle_btn.isChecked():
@@ -333,7 +561,7 @@ class LinksMixin:
                 self.add_link_item(name)
                 
                 # Default spawn position: (50, 50, 50) cm
-                ratio = self.canvas.grid_units_per_cm
+                ratio = get_engine_units_per_cm()
                 t_import = np.eye(4)
                 t_import[:3, 3] = [50.0 * ratio, 50.0 * ratio, 50.0 * ratio]
                 link.t_offset = t_import
@@ -346,9 +574,15 @@ class LinksMixin:
                 self.canvas.ensure_grid_fits_bounds(actor.GetBounds())
                 
                 self.log(f"Successfully loaded: {name}")
+                self._log_import_debug(name, import_debug)
                 
                 # Auto-select and focus
                 self.canvas.select_actor(name)
+                for i in range(self.links_list.count()):
+                    item_i = self.links_list.item(i)
+                    if item_i and item_i.text() == name:
+                        self.links_list.setCurrentItem(item_i)
+                        break
                 self.canvas.focus_on_actor(name)
                 
                 self.update_link_colors()

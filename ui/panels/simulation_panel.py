@@ -796,8 +796,9 @@ class SimulationPanel(QtWidgets.QWidget):
 
         # Sync UI after every tick
         self._sync_all_sliders()
-        self.main_window.canvas.update_transforms(self.main_window.robot)
-        self.main_window.update_live_ui()
+        self.main_window.canvas.update_transforms(self.main_window.robot, render=False)
+        self.main_window.update_live_ui(render=False)
+        self.main_window.canvas.plotter.render()
 
     def _get_object_grip_width(self):
         """

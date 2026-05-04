@@ -1,4 +1,4 @@
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 
 
@@ -48,6 +48,31 @@ class GripperPanel(QtWidgets.QWidget):
                 color: #2e7d32;
             }
         """
+
+    def _coord_spinbox_style(self, color):
+        return f"""
+            QDoubleSpinBox {{
+                background: white;
+                color: {color};
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                font-size: 12px;
+                padding: 4px 6px;
+                font-weight: bold;
+            }}
+            QDoubleSpinBox:focus {{
+                border-color: {color};
+            }}
+        """
+
+    def _create_coord_spinbox(self, color="#1565c0"):
+        sb = TypeOnlyDoubleSpinBox()
+        sb.setRange(-9999, 9999)
+        sb.setDecimals(2)
+        sb.setSuffix(" cm")
+        sb.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        sb.setStyleSheet(self._coord_spinbox_style(color))
+        return sb
 
     def init_ui(self):
         layout = QtWidgets.QVBoxLayout(self)
@@ -120,6 +145,7 @@ class GripperPanel(QtWidgets.QWidget):
         ctrl_layout.addWidget(self.stroke_slider)
 
         layout.addWidget(control_group)
+
 
         compute_group = QtWidgets.QGroupBox("3. GRIPPER COMPUTE")
         compute_group.setStyleSheet(self._group_style())
@@ -197,6 +223,7 @@ class GripperPanel(QtWidgets.QWidget):
         if not item:
             return None
         return item.data(QtCore.Qt.UserRole)
+
 
     def _selected_group_members(self):
         item = self.joints_list.currentItem()
@@ -1071,7 +1098,8 @@ class GripperPanel(QtWidgets.QWidget):
     def _joint_selection_entries(self):
         robot = self.mw.robot
         entries = []
-        pair_index = 1
+        # Track which joints are already covered by a relation entry
+        joints_in_relations = set()
 
         for master_name in sorted(robot.joint_relations.keys(), key=self._joint_name_sort_key):
             if master_name not in robot.joints:
@@ -1083,8 +1111,13 @@ class GripperPanel(QtWidgets.QWidget):
                 if slave_joint is None:
                     continue
 
+                # One entry per relation, displayed under the master joint name only.
+                # Both master and slave are tracked so neither appears as a standalone single.
                 members = [master_name, slave_name]
-                display_name = f"Pair {pair_index}: {master_name}, {slave_name}"
+                joints_in_relations.add(master_name)
+                joints_in_relations.add(slave_name)
+
+                display_name = master_name  # Show only the master joint name in the UI
                 tooltip = (
                     f"{master_name}: {master_joint.parent_link.name} -> {master_joint.child_link.name} | "
                     f"{slave_name}: {slave_joint.parent_link.name} -> {slave_joint.child_link.name} | "
@@ -1098,11 +1131,10 @@ class GripperPanel(QtWidgets.QWidget):
                         "tooltip": tooltip,
                     }
                 )
-                pair_index += 1
 
         single_index = 1
         for joint_name in sorted(robot.joints.keys(), key=self._joint_name_sort_key):
-            if any(joint_name in entry["members"] for entry in entries):
+            if joint_name in joints_in_relations:
                 continue
 
             joint = robot.joints[joint_name]
@@ -1125,9 +1157,14 @@ class GripperPanel(QtWidgets.QWidget):
 
     def on_make_robo(self):
         self.mw.log("🚀 FINALIZING ASSEMBLY: Building Robot Kinematic Tree...")
-        if self.mw.make_robot():
+        success = self.mw.make_robot()
+        if success:
             self.refresh_joints()
+            if hasattr(self.mw, 'experiment_tab'):
+                self.mw.experiment_tab.update_display()
             self.mw.show_toast("Assembly Finalized", "success")
+        else:
+            self.mw.show_toast("Assembly Failed", "error")
 
     def refresh_sliders(self):
         self.refresh_joints()
@@ -2479,6 +2516,7 @@ class GripperPanel(QtWidgets.QWidget):
 
         if hasattr(self.mw, 'matrices_tab'):
             self.mw.matrices_tab.sync_slider(link_name if link_name else joint_id, value)
+
 
     def on_stroke_changed(self, value):
         item = self.joints_list.currentItem()

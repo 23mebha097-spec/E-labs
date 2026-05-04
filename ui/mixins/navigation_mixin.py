@@ -1,5 +1,6 @@
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
+import os
 
 from core.firmware_gen import generate_esp32_firmware
 
@@ -76,7 +77,18 @@ class ToastNotification(QtWidgets.QFrame):
 
 
 class NavigationMixin:
-    """Methods for panel switching, simulation, speed, terminal, styling, and code generation."""
+    """Methods for panel switching, simulation, speed, terminal, styling, and robot movement."""
+
+    def _init_navigation_mixin(self):
+        """Initialize navigation/movement state. Should be called by MainWindow.__init__."""
+        self._anim_timer = QtCore.QTimer(self)
+        self._anim_timer.timeout.connect(self._on_anim_tick)
+        self._anim_joint_ids = []
+        self._anim_child_names = []
+        self._target_angles = []
+        self._current_angles = []
+        self._anim_success = True
+        self._anim_blocking = False # Used for scripts to wait for animation
 
     def on_deselect(self):
         """Clears list selections when 3D selection is cancelled (Esc)."""
@@ -177,16 +189,12 @@ class NavigationMixin:
             self.speed_spin.blockSignals(False)
         self.show_speed_overlay()
 
-    def update_live_ui(self):
+    def update_live_ui(self, render=True):
         """Updates the Live Point (LP) coordinates and handles Pick-and-Place simulation logic."""
-        if not hasattr(self, 'live_x'):
-            return
-            
         tcp_link = None
-        custom_tcp = getattr(self, 'custom_tcp_name', None)
-        if custom_tcp and custom_tcp in self.robot.links:
-            tcp_link = self.robot.links[custom_tcp]
-        
+        if hasattr(self, "_get_preferred_tcp_link"):
+            tcp_link = self._get_preferred_tcp_link()
+
         if not tcp_link:
             # Fallback: Find the physically "top-most" point among all links
             best_z = -float('inf')
@@ -201,30 +209,44 @@ class NavigationMixin:
         if tcp_link:
             # Use Tool Point for accurate LP display
             pos, _, _ = self.get_link_tool_point(tcp_link)
-            
-            self.live_x.blockSignals(True)
-            self.live_y.blockSignals(True)
-            self.live_z.blockSignals(True)
-            
+
             ratio = self.canvas.grid_units_per_cm
             lx, ly, lz = pos[0] / ratio, pos[1] / ratio, pos[2] / ratio
-            
-            self.live_x.setValue(lx)
-            self.live_y.setValue(ly)
-            self.live_z.setValue(lz)
-            
-            self.live_x.blockSignals(False)
-            self.live_y.blockSignals(False)
-            self.live_z.blockSignals(False)
-            
+
+            # Keep the latest live point available globally even if the LP widgets
+            # are not present in the current UI layout.
+            self.current_live_point_cm = (lx, ly, lz)
+
+            live_x = getattr(self, "live_x", None)
+            live_y = getattr(self, "live_y", None)
+            live_z = getattr(self, "live_z", None)
+            if all(widget is not None for widget in (live_x, live_y, live_z)):
+                live_x.blockSignals(True)
+                live_y.blockSignals(True)
+                live_z.blockSignals(True)
+
+                live_x.setValue(lx)
+                live_y.setValue(ly)
+                live_z.setValue(lz)
+
+                live_x.blockSignals(False)
+                live_y.blockSignals(False)
+                live_z.blockSignals(False)
+
             # Update 3D Engine HUD
             if hasattr(self.canvas, 'update_hud_coords'):
-                self.canvas.update_hud_coords(lx, ly, lz)
+                self.canvas.update_hud_coords(lx, ly, lz, render=render)
+            if hasattr(self.canvas, 'update_live_point_marker'):
+                self.canvas.update_live_point_marker(pos, render=render)
 
             # Pick-and-Place Simulation Logic (MAGNET MODE)
             sim_tab = getattr(self, 'simulation_tab', None)
             if sim_tab and hasattr(sim_tab, 'is_sim_active') and sim_tab.is_sim_active:
                 self._handle_sim_pick_place(tcp_link, pos, ratio)
+        else:
+            self.current_live_point_cm = None
+            if hasattr(self.canvas, 'clear_live_point_marker'):
+                self.canvas.clear_live_point_marker()
 
     # ─── Simulation Object Helpers (ported from Torotron) ─────────────
 
@@ -455,40 +477,38 @@ class NavigationMixin:
     def get_link_tool_point(self, link, return_vec=False):
         """
         Calculates the Tool Center Point (TCP) in World and Local coords.
-        - If the link has related child joints ('Gripper'), calculates midpoint between fingers.
-        - Otherwise, calculates the center-top point of the mesh bounds.
         """
         if not link:
             if return_vec: return np.zeros(3), np.zeros(3), None
             return np.zeros(3), np.zeros(3), 0.0
 
-        # 1. Identify 'Fingers' (ONLY child links of joints explicitly marked as 'Gripper')
+        # 1. Identify 'Fingers'
         fingers = []
         for joint in link.child_joints:
             if getattr(joint, 'is_gripper', False) and joint.child_link:
                 fingers.append(joint.child_link)
 
-        # --- Priority 1: User-Defined Custom TCP (Live Point) ---
+        # Priority 1: User-Defined Custom TCP
+        if hasattr(self, "robot") and link.name in self.robot.links:
+            tcp_local_tf = self.robot.get_tcp_local_transform(link)
+        else:
+            tcp_local_tf = np.eye(4)
+
         if hasattr(link, 'custom_tcp_offset') and link.custom_tcp_offset is not None:
-            local_tool_point = np.array(link.custom_tcp_offset)
+            local_tool_point = tcp_local_tf[:3, 3]
             world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
-            
-            # Use multi-finger gap estimation if available, otherwise 0
             gap = 0.0
             if fingers:
-                # Still try to find gap if fingers are present for logic
                 pts_world = []
                 for f in fingers:
                     if f.mesh:
                         b = f.mesh.bounds
                         c_finger = (b[0] + b[1]) / 2.0
                         pts_world.append((f.t_world @ np.append(c_finger, 1.0))[:3])
-                
                 if len(pts_world) >= 2:
                     for i in range(len(pts_world)):
                         for j in range(i + 1, len(pts_world)):
                             gap = max(gap, np.linalg.norm(pts_world[i] - pts_world[j]))
-            
             if return_vec:
                 return world_tool_point, local_tool_point, None
             return world_tool_point, local_tool_point, gap
@@ -499,169 +519,79 @@ class NavigationMixin:
             pts_local = []
             for f in fingers:
                 if f.mesh:
-                    # LOCAL center of finger mesh in finger's own frame
                     b = f.mesh.bounds
                     c_finger = (b[0] + b[1]) / 2.0
-                    
-                    # Store world point
                     w_pt = (f.t_world @ np.append(c_finger, 1.0))[:3]
                     pts_world.append(w_pt)
-                    
-                    # Store point in hand's local frame
                     inv_hand = np.linalg.inv(link.t_world)
                     pt_in_hand = (inv_hand @ np.append(w_pt, 1.0))[:3]
                     pts_local.append(pt_in_hand)
-            
             if pts_local:
-                local_tool_point = np.mean(pts_local, axis=0) # Midpoint in HAND frame
+                local_tool_point = np.mean(pts_local, axis=0)
                 world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
-                
-                # Identify the two most distant fingers for primary span
-                max_span_centers = 0.0
-                best_indices = (0, 1)
+                max_span = 0.0
                 best_vec = np.array([1.0, 0.0, 0.0])
-                
                 for i in range(len(pts_world)):
                     for j in range(i + 1, len(pts_world)):
                         v = pts_world[i] - pts_world[j]
                         d = np.linalg.norm(v)
-                        if d > max_span_centers:
-                            max_span_centers = d
+                        if d > max_span:
+                            max_span = d
                             best_vec = v
-                            best_indices = (i, j)
-                if np.linalg.norm(best_vec) > 1e-9:
-                    best_vec /= np.linalg.norm(best_vec)
-
-                # --- ACCOUNT FOR FINGER DEPTH & APPROACH AXIS ---
-                approach_axis = link.t_world[:3, 2]
-                if np.linalg.norm(approach_axis) > 1e-9:
-                    approach_axis /= np.linalg.norm(approach_axis)
-
-                finger_depth = 0.0
-                depth_samples = []
-                for f in fingers:
-                    if f.mesh:
-                        v_w = (f.t_world[:3, :3] @ f.mesh.vertices.T).T + f.t_world[:3, 3]
-                        p_depth = v_w @ approach_axis
-                        depth_samples.append(np.ptp(p_depth))
-                
-                if depth_samples:
-                    finger_depth = np.max(depth_samples)
-
-                # --- ACCOUNT FOR FINGER THICKNESS (Real Gap) ---
-                real_gap = max_span_centers
-                if best_indices[0] < len(fingers) and best_indices[1] < len(fingers):
-                    f1, f2 = fingers[best_indices[0]], fingers[best_indices[1]]
-                    
-                    if f1.mesh and f2.mesh:
-                        v1_w = (f1.t_world[:3, :3] @ f1.mesh.vertices.T).T + f1.t_world[:3, 3]
-                        v2_w = (f2.t_world[:3, :3] @ f2.mesh.vertices.T).T + f2.t_world[:3, 3]
-                        
-                        p1 = v1_w @ best_vec
-                        p2 = v2_w @ best_vec
-                        
-                        real_gap = max(0.0, np.min(p1) - np.max(p2))
-
+                real_gap = max_span
                 if return_vec:
-                    return world_tool_point, local_tool_point, {
-                        "fingers_world": pts_world, 
-                        "primary_axis": best_vec, 
-                        "approach_axis": approach_axis,
-                        "finger_depth": finger_depth,
-                        "real_gap": real_gap,
-                        "centers_span": max_span_centers
-                    }
-                
+                    return world_tool_point, local_tool_point, {"real_gap": real_gap}
                 return world_tool_point, local_tool_point, real_gap
 
-        
         # 3. Fallback: Standard leaf or mesh-top point
         if not link.mesh:
             res = (link.t_world[:3, 3], np.zeros(3), None)
             return res if return_vec else (res[0], res[1], 0.0)
-            
         bounds = link.mesh.bounds 
         center_x = (bounds[0][0] + bounds[1][0]) / 2.0
         center_y = (bounds[0][1] + bounds[1][1]) / 2.0
         top_z = bounds[1][2]
-        
         local_tool_point = np.array([center_x, center_y, top_z])
         world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
-        
         if return_vec:
             return world_tool_point, local_tool_point, None
         return world_tool_point, local_tool_point, None
 
-
     def show_speed_overlay(self):
         """Displays current speed percentage on the 3D canvas temporarily"""
         text = f"Speed: {self.current_speed}%"
-        self.canvas.plotter.add_text(
-            text, 
-            position='lower_right', 
-            font_size=12, 
-            color='#1976d2', 
-            name="speed_overlay"
-        )
+        self.canvas.plotter.add_text(text, position='lower_right', font_size=12, color='#1976d2', name="speed_overlay")
         self.canvas.plotter.render()
 
     def on_tab_changed(self, index):
-        # Disable dragging for all tabs except 'Links'
         is_links = index == self.panel_stack.indexOf(self.links_tab)
         self.canvas.enable_drag = is_links
-
-        # Toggle Gripper Surface button (only visible in Joint Mode)
         if hasattr(self, 'gripper_surface_btn'):
             self.gripper_surface_btn.setVisible(index == self.panel_stack.indexOf(self.joint_tab))
-
-        # Identify current widget and trigger refreshes
         widget = self.panel_stack.widget(index)
         if not widget: return
-
-        # Refresh joint list if entering Gripper tab
         if hasattr(self, 'gripper_tab') and widget == self.gripper_tab:
             self.gripper_tab.refresh_joints()
-        if hasattr(widget, 'refresh_links'):
-            widget.refresh_links()
-        if hasattr(widget, 'update_display'):
-            widget.update_display()
-        if hasattr(widget, 'refresh_sliders'):
-            widget.refresh_sliders()
-            
-        # Update live point display
+        if hasattr(widget, 'refresh_links'): widget.refresh_links()
+        if hasattr(widget, 'update_display'): widget.update_display()
+        if hasattr(widget, 'refresh_sliders'): widget.refresh_sliders()
         self.update_live_ui()
 
     def log(self, text):
         """Logs a message to the terminal with color-coded formatting."""
         import html as html_mod
         safe = html_mod.escape(str(text))
-        
-        # Determine color and prefix
         lower = safe.lower()
-        if any(k in lower for k in ['error', '❌', 'fail', 'missing dependency']):
-            color = '#f44336'
-            prefix = '<span style="color:#f44336;">✗</span>'
-        elif any(k in lower for k in ['success', 'finished', 'loaded', 'saved', 'ready', '✅']):
-            color = '#4caf50'
-            prefix = '<span style="color:#4caf50;">✓</span>'
-        elif any(k in lower for k in ['warning', '⚠', 'skip', 'caution']):
-            color = '#ff9800'
-            prefix = '<span style="color:#ff9800;">⚠</span>'
-        elif any(k in lower for k in ['📡', '🧪', '⚡', 'uploading', 'running', 'simulation', 'generating']):
-            color = '#42a5f5'
-            prefix = '<span style="color:#42a5f5;">›</span>'
-        else:
-            color = '#d4d4d4'
-            prefix = '<span style="color:#757575;">›</span>'
-        
-        html = f'{prefix} <span style="color:{color};">{safe}</span>'
+        if any(k in lower for k in ['error', '❌', 'fail']): color = '#f44336'
+        elif any(k in lower for k in ['success', 'finished', 'loaded', 'saved', '✅']): color = '#4caf50'
+        elif any(k in lower for k in ['warning', '⚠']): color = '#ff9800'
+        else: color = '#d4d4d4'
+        html = f'<span style="color:{color};">› {safe}</span>'
         self.console.append(html)
-        
-        # Auto-show terminal on errors
         if '#f44336' in color and not self.terminal_btn.isChecked():
             self.terminal_btn.setChecked(True)
             self.toggle_terminal()
-    
+
     def toggle_terminal(self):
         """Show/hide the terminal console."""
         if self.terminal_btn.isChecked():
@@ -672,95 +602,213 @@ class NavigationMixin:
             self.right_splitter.setSizes([800, 0])
 
     def on_generate_code(self):
-        """Generates ESP32 code and populates the sidebar panel."""
+        """Generates cross-platform control code and populates the sidebar panel."""
         if not self.robot.joints:
             self.log("⚠️ No joints defined! Add some joints first.")
             self.show_toast("No joints defined yet", "warning")
             return
             
-        code = generate_esp32_firmware(self.robot, default_speed=self.current_speed)
-        self.code_drawer.set_code(code)
+        from core.script_gen import generate_python_script, generate_matlab_script
         
-        # Expand the splitter to show the code panel (Width 400 suggested)
+        arduino_code = generate_esp32_firmware(self.robot, default_speed=self.current_speed)
+        python_code = generate_python_script(self.robot)
+        matlab_code = generate_matlab_script(self.robot)
+        
+        self.code_drawer.set_codes(arduino_code, python_code, matlab_code)
         self.code_drawer.show()
         self.main_splitter.setSizes([350, 450, 400])
-        
-        self.log("⚡ ESP32 Code Generated in Sidebar.")
-        self.show_toast("Firmware built successfully", "success")
+        self.log("⚡ Cross-Platform Code (ESP32/Python/Matlab) Generated in Sidebar.")
+        self.show_toast("Robot code built successfully", "success")
 
     def show_toast(self, message, toast_type='info', duration=3000):
-        """Show an animated toast notification at the bottom-right of the window."""
+        """Show an animated toast notification."""
         ToastNotification(self, message, toast_type, duration)
 
+    # ─── Robot Movement & Animation ───────────────────────────────────
+
+    def _start_joint_animation(self, joint_ids, child_names, target_deg_list, success=True, blocking=False):
+        """Starts a smooth animation of multiple joints to target angles."""
+        if not hasattr(self, '_anim_timer'):
+            self._init_navigation_mixin()
+
+        if self._anim_timer.isActive():
+            self._anim_timer.stop()
+
+        self._anim_success = success
+        self._anim_joint_ids = list(joint_ids)
+        self._anim_child_names = list(child_names)
+        self._target_angles = list(target_deg_list)
+        self._current_angles = []
+        self._anim_blocking = blocking
+
+        for joint_id in self._anim_joint_ids:
+            joint = self.robot.joints.get(joint_id)
+            self._current_angles.append(joint.current_value if joint else 0.0)
+
+        # Disable some UI buttons during animation if needed
+        # (Usually handled by panels, but we can emit a signal or set a flag)
+
+        self._anim_timer.start(30) # 33 FPS roughly
+
+        if blocking:
+            # Simple spin-wait for scripts (must process events to keep UI alive)
+            while self._anim_timer.isActive():
+                QtWidgets.QApplication.processEvents()
+                import time
+                time.sleep(0.01)
+
+    def _on_anim_tick(self):
+        """Handles each step of the joint animation."""
+        done = True
+        # Speed scales with the global current_speed setting
+        base_max_step = 3.0 * (self.current_speed / 50.0) 
+        base_min_step = 0.15 * (self.current_speed / 50.0)
+        ramp_dist = 18.0
+
+        for idx, child_name in enumerate(self._anim_child_names):
+            curr = self._current_angles[idx]
+            target = self._target_angles[idx]
+            diff = target - curr
+            
+            if abs(diff) < 0.05:
+                next_angle = target
+            else:
+                step_mag = max(base_min_step, min(base_max_step, base_max_step * (abs(diff) / ramp_dist)))
+                next_angle = curr + np.sign(diff) * min(abs(diff), step_mag)
+                done = False
+                
+            self._current_angles[idx] = float(next_angle)
+            self.robot.set_joint_value(self._anim_joint_ids[idx], self._current_angles[idx], propagate_relations=True)
+            
+            # Sync UI
+            self._sync_joint_ui_globally(child_name, self._current_angles[idx])
+
+        self.robot.update_kinematics()
+        self.canvas.update_transforms(self.robot)
+        self.update_live_ui(render=True)
+
+        if done:
+            self._anim_timer.stop()
+            # If there was a pending "success" toast from IK
+            if hasattr(self, 'show_toast'):
+                self.show_toast("Target Reached", "success" if self._anim_success else "warning")
+            
+            # Update panels that might need a final refresh
+            if hasattr(self, 'experiment_tab'):
+                self.experiment_tab.update_display()
+
+    def _sync_joint_ui_globally(self, child_name, angle_deg):
+        """Synchronizes all UI components with a new joint value."""
+        # 1. Joint Tab
+        if hasattr(self, 'joint_tab'):
+            if child_name in self.joint_tab.joints:
+                self.joint_tab.joints[child_name]['current_angle'] = float(angle_deg)
+                if self.joint_tab.active_joint_control == child_name:
+                    self.joint_tab.joint_control_slider.blockSignals(True)
+                    self.joint_tab.joint_control_slider.setValue(int(round(angle_deg * 10.0)))
+                    self.joint_tab.joint_control_slider.blockSignals(False)
+                    self.joint_tab.joint_control_spinbox.blockSignals(True)
+                    self.joint_tab.joint_control_spinbox.setValue(float(angle_deg))
+                    self.joint_tab.joint_control_spinbox.blockSignals(False)
+
+        # 2. Experiment Tab (Matrices, IK/FK)
+        if hasattr(self, 'experiment_tab'):
+            self.experiment_tab.sync_slider(child_name, angle_deg)
+
+    def _move_tcp_to_xyz(self, x_cm, y_cm, z_cm, tcp_link, blocking=False):
+        """Solves IK for a target and starts smooth animation."""
+        if not tcp_link:
+            return False, "No TCP found"
+
+        # 1. Calculate Target Pose
+        ratio = self.canvas.grid_units_per_cm
+        target_world = np.array([x_cm, y_cm, z_cm]) * ratio
+        
+        target_tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+        target_tcp_pose[:3, 3] = target_world
+
+        # 2. Store old state
+        old_angles = {name: joint.current_value for name, joint in self.robot.joints.items()}
+        chain = self.robot.get_kinematic_chain(tcp_link)
+        
+        # 3. Solve IK
+        success, info = self.robot.inverse_kinematics_pose(
+            target_tcp_pose,
+            tcp_link,
+            max_iters=1000,
+            position_tolerance=max(0.1 * ratio, 0.1),
+            orientation_tolerance=1e6,
+            orientation_weight=0.0,
+            joint_change_weight=0.01,
+        )
+
+        # Fallback: try nearest point
+        if not success:
+            workspace_hint = self.robot.get_workspace_target_hint(target_world, tcp_link)
+            if workspace_hint.get("ok") and not workspace_hint.get("inside_workspace", True):
+                for name, val in old_angles.items():
+                    self.robot.joints[name].current_value = val
+                self.robot.update_kinematics()
+
+                fallback_world = np.array(workspace_hint["nearest_point"], dtype=float)
+                fallback_tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+                fallback_tcp_pose[:3, 3] = fallback_world
+                success, info = self.robot.inverse_kinematics_pose(
+                    fallback_tcp_pose,
+                    tcp_link,
+                    max_iters=1000,
+                    position_tolerance=max(0.1 * ratio, 0.1),
+                    orientation_tolerance=1e6,
+                    orientation_weight=0.0,
+                    joint_change_weight=0.01,
+                )
+
+        # 4. Extract results
+        ordered_child_names = [joint.child_link.name for joint in chain]
+        ordered_joint_ids = [joint.name for joint in chain]
+        new_angles = [joint.current_value for joint in chain]
+
+        # 5. Revert for animation
+        for name, value in old_angles.items():
+            self.robot.joints[name].current_value = value
+        self.robot.update_kinematics()
+
+        # 6. Start Animation
+        moved_joint_ids = []
+        moved_child_names = []
+        moved_targets = []
+        
+        for jid, cname, n_ang in zip(ordered_joint_ids, ordered_child_names, new_angles):
+            o_ang = old_angles[jid]
+            if abs(n_ang - o_ang) > 0.001:
+                moved_joint_ids.append(jid)
+                moved_child_names.append(cname)
+                moved_targets.append(n_ang)
+
+        if moved_joint_ids:
+            self._start_joint_animation(moved_joint_ids, moved_child_names, moved_targets, success=success, blocking=blocking)
+        else:
+            self.log("Target already reached.")
+            
+        return success, info
+
+    def move_joint_animated(self, joint_id, target_angle, blocking=False):
+        """Moves a single joint smoothly."""
+        joint = self.robot.joints.get(joint_id)
+        if not joint:
+            return False
+        
+        child_name = joint.child_link.name if joint.child_link else joint_id
+        self._start_joint_animation([joint_id], [child_name], [target_angle], blocking=blocking)
+        return True
+
     def apply_styles(self):
-        # Premium light theme with blue, white, black, and grey
         self.setStyleSheet("""
-            QMainWindow, QWidget {
-                background-color: #f5f5f5;
-                color: #212121;
-                font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-                font-size: 18px;
-            }
-            QLabel {
-                font-size: 18px;
-            }
-            QTabWidget::pane {
-                border: 1px solid #bbb;
-                background-color: white;
-            }
-            QTabBar::tab {
-                background: #e0e0e0;
-                padding: 10px;
-                border: 1px solid #bbb;
-                color: #212121;
-            }
-            QTabBar::tab:selected {
-                background: #1976d2;
-                color: white;
-            }
-            QPushButton {
-                background-color: white;
-                border: 2px solid #e0e0e0;
-                padding: 10px 15px;
-                border-radius: 8px;
-                color: #212121;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: white;
-                color: #1976d2;
-                border: 2px solid #1976d2;
-            }
-            QPushButton:pressed {
-                background-color: #e3f2fd;
-                color: #1976d2;
-                border: 2px solid #1976d2;
-            }
-            QPushButton:disabled {
-                background-color: #f5f5f5;
-                color: #9e9e9e;
-                border: 2px solid #e0e0e0;
-            }
-            QListWidget {
-                background-color: white;
-                border: 1px solid #bbb;
-                color: #212121;
-            }
-            QTextEdit {
-                background-color: white;
-                color: #1565c0;
-                font-family: 'Consolas', monospace;
-                border: 1px solid #bbb;
-            }
-            QSplitter::handle {
-                background-color: #bbb;
-            }
-            QSplitter::handle:horizontal:hover, QSplitter::handle:vertical:hover {
-                background-color: #1976d2;
-            }
-            QComboBox QAbstractItemView {
-                background-color: white;
-                color: #212121;
-                selection-background-color: #1976d2;
-            }
+            QMainWindow, QWidget { background-color: #f5f5f5; color: #212121; font-family: 'Segoe UI', Roboto, sans-serif; font-size: 18px; }
+            QPushButton { background-color: white; border: 2px solid #e0e0e0; padding: 10px 15px; border-radius: 8px; color: #212121; font-weight: bold; }
+            QPushButton:hover { color: #1976d2; border-color: #1976d2; }
+            QListWidget { background-color: white; border: 1px solid #bbb; }
+            QTextEdit { background-color: white; color: #1565c0; font-family: 'Consolas', monospace; border: 1px solid #bbb; }
+            QSplitter::handle { background-color: #bbb; }
+            QSplitter::handle:hover { background-color: #1976d2; }
         """)

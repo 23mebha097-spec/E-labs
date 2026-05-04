@@ -3,10 +3,107 @@ import os
 import numpy as np
 
 from core.robot import Robot
+from core.import_units import get_engine_internal_unit
 
 
 class ProjectMixin:
     """Methods for saving and loading robot project files (.trn)."""
+
+    def _project_dialog_dir(self):
+        candidate = getattr(self, "last_project_dir", "") or os.getcwd()
+        if os.path.isfile(candidate):
+            candidate = os.path.dirname(candidate)
+        if not candidate or not os.path.isdir(candidate):
+            candidate = os.getcwd()
+        return candidate
+
+    def _detect_legacy_project_scale(self, robot_data, temp_dir):
+        """Detect older project files saved in meters before internal-mm normalization."""
+        links = robot_data.get("links", [])
+        if not links:
+            return 1.0, "no links"
+
+        # Modern projects include import metadata/preferences from the newer loader.
+        has_modern_metadata = any(link.get("import_metadata") for link in links) or bool(
+            robot_data.get("ui_state", {}).get("import_preferences")
+        )
+        if has_modern_metadata:
+            return 1.0, "modern metadata present"
+
+        try:
+            import trimesh
+        except Exception:
+            return 1.0, "trimesh unavailable for detection"
+
+        max_extent = 0.0
+        max_translation = 0.0
+        inspected = 0
+        for link in links:
+            mesh_rel_path = link.get("mesh_file")
+            if not mesh_rel_path:
+                continue
+            mesh_path = os.path.join(temp_dir, mesh_rel_path)
+            if not os.path.exists(mesh_path):
+                continue
+            mesh = trimesh.load(mesh_path)
+            if isinstance(mesh, trimesh.Scene):
+                mesh = mesh.to_mesh()
+            if hasattr(mesh, "bounds"):
+                bounds = np.array(mesh.bounds, dtype=float)
+                if bounds.shape == (2, 3):
+                    extent = float(np.max(bounds[1] - bounds[0]))
+                    max_extent = max(max_extent, extent)
+            t_offset = np.array(link.get("t_offset", np.eye(4)), dtype=float)
+            if t_offset.shape == (4, 4):
+                max_translation = max(max_translation, float(np.max(np.abs(t_offset[:3, 3]))))
+            inspected += 1
+
+        if not inspected:
+            return 1.0, "no mesh data inspected"
+
+        # Older projects stored robot geometry in meters; typical robot dimensions and
+        # offsets therefore fall below ~2.0. In current internal-mm projects they are
+        # normally tens to hundreds.
+        if max_extent <= 2.0 and max_translation <= 2.0:
+            return 1000.0, "legacy meter-based project detected"
+
+        return 1.0, "already aligned with current internal units"
+
+    def _scale_legacy_project_data(self, robot_data, scale_factor):
+        if abs(scale_factor - 1.0) < 1e-12:
+            return
+
+        for link in robot_data.get("links", []):
+            t_offset = np.array(link.get("t_offset", np.eye(4)), dtype=float)
+            if t_offset.shape == (4, 4):
+                t_offset[:3, 3] *= scale_factor
+                link["t_offset"] = t_offset.tolist()
+
+            if link.get("custom_tcp_offset") is not None:
+                link["custom_tcp_offset"] = (np.array(link["custom_tcp_offset"], dtype=float) * scale_factor).tolist()
+
+            if link.get("pick_pos") is not None:
+                link["pick_pos"] = (np.array(link["pick_pos"], dtype=float) * scale_factor).tolist()
+
+            if link.get("place_pos") is not None:
+                link["place_pos"] = (np.array(link["place_pos"], dtype=float) * scale_factor).tolist()
+
+        for joint in robot_data.get("joints", []):
+            if joint.get("origin") is not None:
+                joint["origin"] = (np.array(joint["origin"], dtype=float) * scale_factor).tolist()
+
+        ui_state = robot_data.get("ui_state", {})
+        if ui_state.get("alignment_point") is not None:
+            ui_state["alignment_point"] = (np.array(ui_state["alignment_point"], dtype=float) * scale_factor).tolist()
+        if isinstance(ui_state.get("alignment_cache"), dict):
+            for key, value in list(ui_state["alignment_cache"].items()):
+                ui_state["alignment_cache"][key] = (np.array(value, dtype=float) * scale_factor).tolist()
+        if isinstance(ui_state.get("joint_panel_joints"), dict):
+            for _, data in ui_state["joint_panel_joints"].items():
+                if data.get("alignment_point") is not None:
+                    data["alignment_point"] = (np.array(data["alignment_point"], dtype=float) * scale_factor).tolist()
+                if data.get("custom_tcp_offset") is not None:
+                    data["custom_tcp_offset"] = (np.array(data["custom_tcp_offset"], dtype=float) * scale_factor).tolist()
 
     def save_project(self):
         """Saves current robot configuration into a .trn zip file."""
@@ -17,13 +114,17 @@ class ProjectMixin:
         import shutil
 
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Save Project", "", "ToRoTRoN Project (*.trn)"
+            self,
+            "Save Project",
+            os.path.join(self._project_dialog_dir(), "project.trn"),
+            "ToRoTRoN Project (*.trn);;Zip Archive (*.zip);;All Files (*)"
         )
         if not file_path:
             return
             
-        if not file_path.endswith('.trn'):
+        if not file_path.lower().endswith(('.trn', '.zip')):
             file_path += '.trn'
+        self.last_project_dir = os.path.dirname(file_path)
 
         try:
             # Create a temporary directory to gather files
@@ -42,7 +143,9 @@ class ProjectMixin:
                         "alignment_normal": None,
                         "alignment_cache": {},
                         "current_speed": 50,
-                        "camera_position": None
+                        "camera_position": None,
+                        "import_preferences": {},
+                        "last_project_dir": getattr(self, "last_project_dir", os.getcwd()),
                     },
                     "joint_relations": {}
                 }
@@ -61,9 +164,12 @@ class ProjectMixin:
                         "color": link.color,
                         "is_base": link.is_base,
                         "t_offset": link.t_offset.tolist(),
+                        "custom_tcp_offset": None if getattr(link, "custom_tcp_offset", None) is None else list(link.custom_tcp_offset),
+                        "custom_tcp_rpy_deg": list(getattr(link, "custom_tcp_rpy_deg", [0.0, 0.0, 0.0])),
                         "is_sim_obj": getattr(link, "is_sim_obj", False),
                         "pick_pos": list(getattr(link, "pick_pos", [0.0, 0.0, 0.0])),
-                        "place_pos": list(getattr(link, "place_pos", [0.0, 0.0, 0.0]))
+                        "place_pos": list(getattr(link, "place_pos", [0.0, 0.0, 0.0])),
+                        "import_metadata": getattr(link, "import_metadata", {}),
                     })
 
                 # 2. Gather Joints (Robot Core)
@@ -120,6 +226,9 @@ class ProjectMixin:
                 if hasattr(self, 'canvas'):
                     robot_data["ui_state"]["camera_position"] = [list(p) for p in self.canvas.plotter.camera_position]
 
+                if hasattr(self, "import_preferences"):
+                    robot_data["ui_state"]["import_preferences"] = dict(self.import_preferences)
+
                 # 4. Write JSON
                 json_path = os.path.join(temp_dir, "robot.json")
                 with open(json_path, 'w') as f:
@@ -140,19 +249,23 @@ class ProjectMixin:
             self.log(f"SAVE ERROR: {str(e)}")
             QtWidgets.QMessageBox.critical(self, "Save Error", f"Could not save project: {str(e)}")
 
-    def load_project(self):
-        """Loads a robot configuration from a .trn zip file."""
+    def load_project_from_path(self, file_path, show_dialogs=True, auto_finalize=True):
+        """Loads a robot configuration from a .trn zip file path."""
         import json
         import zipfile
         import tempfile
         import shutil
         import trimesh
 
-        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self, "Open Project", "", "ToRoTRoN Project (*.trn)"
-        )
         if not file_path:
-            return
+            return False
+        if not os.path.exists(file_path):
+            msg = f"Could not load project because the file does not exist: {file_path}"
+            self.log(msg)
+            if show_dialogs:
+                QtWidgets.QMessageBox.critical(self, "Load Error", msg)
+            return False
+        self.last_project_dir = os.path.dirname(file_path)
 
         try:
             # 1. Clear Current Robot
@@ -167,8 +280,15 @@ class ProjectMixin:
             self.alignment_cache = {}
 
             # Reset UI Panels
-            if hasattr(self, 'joint_tab'): self.joint_tab.reset_joint_ui()
-            if hasattr(self, 'align_tab'): self.align_tab.reset_panel()
+            if hasattr(self, 'joint_tab'):
+                self.joint_tab.reset_joint_ui()
+            if hasattr(self, 'align_tab'):
+                self.align_tab.reset_panel()
+            if hasattr(self, "import_preferences"):
+                self.import_preferences = {
+                    "last_stl_unit": "mm",
+                    "last_up_axis": "preserve",
+                }
 
             # 2. Extract ZIP to temp folder
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -182,6 +302,15 @@ class ProjectMixin:
 
                 with open(json_path, 'r') as f:
                     robot_data = json.load(f)
+
+                legacy_scale_factor, legacy_reason = self._detect_legacy_project_scale(robot_data, temp_dir)
+                if abs(legacy_scale_factor - 1.0) > 1e-12:
+                    self.log(
+                        f"Legacy project normalization: scaling saved geometry and transforms by "
+                        f"{legacy_scale_factor:.1f} for {get_engine_internal_unit()} engine units "
+                        f"({legacy_reason})."
+                    )
+                    self._scale_legacy_project_data(robot_data, legacy_scale_factor)
 
                 # 4. Load Links
                 for l_data in robot_data["links"]:
@@ -198,14 +327,21 @@ class ProjectMixin:
                         mesh = raw_mesh.to_mesh()
                     else:
                         mesh = raw_mesh
+
+                    if abs(legacy_scale_factor - 1.0) > 1e-12:
+                        mesh.apply_scale(legacy_scale_factor)
                         
                     link = self.robot.add_link(name, mesh)
                     link.color = l_data.get("color", "lightgray")
                     link.is_base = l_data.get("is_base", False)
                     link.t_offset = np.array(l_data["t_offset"])
+                    if l_data.get("custom_tcp_offset") is not None:
+                        link.custom_tcp_offset = np.array(l_data["custom_tcp_offset"], dtype=float)
+                    link.custom_tcp_rpy_deg = l_data.get("custom_tcp_rpy_deg", [0.0, 0.0, 0.0])
                     link.is_sim_obj = l_data.get("is_sim_obj", False)
                     link.pick_pos = l_data.get("pick_pos", [0.0, 0.0, 0.0])
                     link.place_pos = l_data.get("place_pos", [0.0, 0.0, 0.0])
+                    link.import_metadata = l_data.get("import_metadata", {})
                     
                     if link.is_base:
                         self.robot.base_link = link
@@ -300,22 +436,52 @@ class ProjectMixin:
                 else:
                     self.canvas.plotter.reset_camera()
 
+                prefs = ui_state.get("import_preferences")
+                if isinstance(prefs, dict):
+                    self.import_preferences.update(prefs)
+
+                last_project_dir = ui_state.get("last_project_dir")
+                if last_project_dir and os.path.isdir(last_project_dir):
+                    self.last_project_dir = last_project_dir
+
             # 7. Final Update
             self.robot.update_kinematics()
             self.canvas.update_transforms(self.robot)
             self.update_link_colors()
+            if hasattr(self, "update_live_ui"):
+                self.update_live_ui()
             
             # Refresh Matrices Panel
             if hasattr(self, 'matrices_tab'):
                 self.matrices_tab.refresh_sliders()
                 self.matrices_tab.update_display()
 
-            # Smart Camera Reset: Find the components and zoom to them
-            self.canvas.view_isometric()
+            # Smart Camera Reset: use robot world-space bounds so loaded parts
+            # appear even when actor bounds/cached camera state are stale.
+            self.canvas.focus_on_robot(self.robot)
+
+            if auto_finalize and hasattr(self, "make_robot"):
+                self.make_robot()
             
             self.log(f"Project loaded from: {os.path.basename(file_path)}")
-            QtWidgets.QMessageBox.information(self, "Success", f"Project '{os.path.basename(file_path)}' loaded successfully.")
+            if show_dialogs:
+                QtWidgets.QMessageBox.information(self, "Success", f"Project '{os.path.basename(file_path)}' loaded successfully.")
+            return True
 
         except Exception as e:
             self.log(f"LOAD ERROR: {str(e)}")
-            QtWidgets.QMessageBox.critical(self, "Load Error", f"Could not load project: {str(e)}")
+            if show_dialogs:
+                QtWidgets.QMessageBox.critical(self, "Load Error", f"Could not load project: {str(e)}")
+            return False
+
+    def load_project(self):
+        """Loads a robot configuration from a .trn zip file."""
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            self._project_dialog_dir(),
+            "Project Files (*.trn *.zip);;ToRoTRoN Project (*.trn);;Zip Archive (*.zip);;All Files (*)"
+        )
+        if not file_path:
+            return False
+        return self.load_project_from_path(file_path, show_dialogs=True, auto_finalize=True)

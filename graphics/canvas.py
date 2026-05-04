@@ -5,6 +5,8 @@ import numpy as np
 import vtkmodules.vtkRenderingCore as vtkRenderingCore
 import vtkmodules.vtkCommonCore as vtkCommonCore
 
+from core.import_units import get_engine_internal_unit, get_engine_units_per_cm
+
 class RobotCanvas(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -19,16 +21,9 @@ class RobotCanvas(QtWidgets.QWidget):
         self.plotter.set_background("white")
         self.plotter.add_axes()
         
-        self.grid_units_per_cm = 10.0 
+        self.grid_units_per_cm = get_engine_units_per_cm()
         self.grid_cm_size = 1000.0    # 10m workspace
-        
-        # Initialize dynamic grid system
-        self._init_custom_grids()
-        self._init_axis_labels()
-        
-        # Observe camera changes for grid/label updates
-        self.plotter.interactor.AddObserver("InteractionEvent", self._on_camera_change)
-        self.plotter.interactor.AddObserver("ModifiedEvent", self._on_camera_change)
+        self.internal_unit_name = get_engine_internal_unit()
         
         # UI Elements
         try:
@@ -36,15 +31,12 @@ class RobotCanvas(QtWidgets.QWidget):
         except:
             pass
         
-        # Initial grid update
-        QtCore.QTimer.singleShot(100, self._on_camera_change)
-        
         self.actors = {} # Link name -> actor
         self.selected_name = None
         self.is_dragging = False
         self.last_pos = None
         self.fixed_actors = set() # Set of actor names that cannot be picked or moved
-       
+        
         # WE DISABLE PyVista's built-in picking to avoid conflicts
         # Instead, we will use dedicated vtk pickers for surgical precision
         self.picker = vtkRenderingCore.vtkPropPicker()
@@ -60,7 +52,14 @@ class RobotCanvas(QtWidgets.QWidget):
 
         # 3D Orientation Cube (Standard Navigation)
         self.plotter.add_camera_orientation_widget()
-        # Optionally style it if needed (PyVista default is high contrast and clear)
+        
+        # Initialize dynamic grid system
+        self._init_custom_grids()
+        self._init_axis_labels()
+        
+        # Observe camera changes for grid/label updates
+        self.plotter.interactor.AddObserver("InteractionEvent", self._on_camera_change)
+        self.plotter.interactor.AddObserver("ModifiedEvent", self._on_camera_change)
         
         # Initial grid update
         QtCore.QTimer.singleShot(100, self._on_camera_change)
@@ -79,7 +78,16 @@ class RobotCanvas(QtWidgets.QWidget):
         self.interaction_mode = "rotate" # 'rotate'
         self.picking_focus_point = False  # Focus point picking mode
         
+        # --- COMMAND SIMULATION ENGINE ---
+        # The legacy CommandProcessor is not present in this repo snapshot.
+        # Keep a placeholder so canvas startup does not fail.
+        self.simulator = None
+        
         # --- 3D ENGINE HUD (Live Point Location) ---
+        self._last_live_point_hud = None
+        self._last_live_point_marker = None
+        self._workspace_actor_name = "robot_workspace_cloud"
+        self._live_point_marker_visible = True  # Toggle flag for the red dot
         self.plotter.add_text(
             "LIVE POINT: X: 0.00, Y: 0.00, Z: 0.00 cm",
             position='upper_left',
@@ -463,6 +471,80 @@ class RobotCanvas(QtWidgets.QWidget):
         """Resets camera to fit the specified bounds."""
         self.plotter.reset_camera(bounds=bounds)
         self.plotter.render()
+
+    def show_workspace_cloud(self, points):
+        """Render a sampled workspace point cloud for the current robot."""
+        try:
+            self.plotter.remove_actor(self._workspace_actor_name)
+        except Exception:
+            pass
+
+        if points is None or len(points) == 0:
+            self.plotter.render()
+            return
+
+        # Visual 'dots' removed as per user request, but data remains in robot model for functional use.
+        # cloud = pv.PolyData(np.array(points, dtype=float))
+        # self.plotter.add_mesh(
+        #     cloud,
+        #     color="#26a69a",
+        #     opacity=0.22,
+        #     point_size=8,
+        #     render_points_as_spheres=True,
+        #     name=self._workspace_actor_name,
+        #     pickable=False,
+        # )
+        self.plotter.render()
+
+    def focus_on_robot(self, robot):
+        """Frames the full robot using mesh data transformed into world space."""
+        world_min = np.array([np.inf, np.inf, np.inf], dtype=float)
+        world_max = np.array([-np.inf, -np.inf, -np.inf], dtype=float)
+        found_geometry = False
+
+        for link in robot.links.values():
+            mesh = getattr(link, "mesh", None)
+            if mesh is None or not hasattr(mesh, "bounds"):
+                continue
+
+            local_bounds = np.array(mesh.bounds, dtype=float)
+            if local_bounds.shape != (2, 3):
+                continue
+
+            mins = local_bounds[0]
+            maxs = local_bounds[1]
+            corners = np.array(
+                [
+                    [mins[0], mins[1], mins[2], 1.0],
+                    [mins[0], mins[1], maxs[2], 1.0],
+                    [mins[0], maxs[1], mins[2], 1.0],
+                    [mins[0], maxs[1], maxs[2], 1.0],
+                    [maxs[0], mins[1], mins[2], 1.0],
+                    [maxs[0], mins[1], maxs[2], 1.0],
+                    [maxs[0], maxs[1], mins[2], 1.0],
+                    [maxs[0], maxs[1], maxs[2], 1.0],
+                ],
+                dtype=float,
+            )
+            transformed = (np.array(link.t_world, dtype=float) @ corners.T).T[:, :3]
+            world_min = np.minimum(world_min, transformed.min(axis=0))
+            world_max = np.maximum(world_max, transformed.max(axis=0))
+            found_geometry = True
+
+        if not found_geometry:
+            self.view_isometric()
+            return
+
+        bounds = (
+            float(world_min[0]), float(world_max[0]),
+            float(world_min[1]), float(world_max[1]),
+            float(world_min[2]), float(world_max[2]),
+        )
+
+        self.plotter.camera_position = 'iso'
+        self.plotter.reset_camera(bounds=bounds)
+        self.plotter.render()
+        self._on_camera_change()
 
     def view_isometric(self):
         """
@@ -1026,10 +1108,9 @@ class RobotCanvas(QtWidgets.QWidget):
         self.actors[link_name] = actor
         self.plotter.render()
 
-    def set_actor_color(self, name, hex_color):
-        """Changes the color of an existing actor."""
+    def set_actor_color(self, name, color):
         if name in self.actors:
-            self.actors[name].GetProperty().SetColor(QtGui.QColor(hex_color).getRgbF()[:3])
+            self.actors[name].GetProperty().SetColor(pv.Color(color))
             self.plotter.render()
 
     def select_actor(self, name):
@@ -1044,7 +1125,7 @@ class RobotCanvas(QtWidgets.QWidget):
                 actor.GetProperty().SetEdgeColor([1, 1, 0]) # Yellow
             else:
                 actor.GetProperty().SetEdgeColor([0.5, 0.5, 0.5]) # Gray
-        self.plotter.render()
+        self._update_selection_visuals()
         self.plotter.render()
 
     def remove_actor(self, name):
@@ -1132,8 +1213,12 @@ class RobotCanvas(QtWidgets.QWidget):
         except Exception:
             pass
 
-    def update_hud_coords(self, x, y, z):
+    def update_hud_coords(self, x, y, z, render=True):
         """Updates the Live Point HUD text on the 3D screen."""
+        rounded = (round(float(x), 2), round(float(y), 2), round(float(z), 2))
+        if self._last_live_point_hud == rounded:
+            return
+        self._last_live_point_hud = rounded
         text = f"LIVE POINT: X: {x:.2f}, Y: {y:.2f}, Z: {z:.2f} cm"
         self.plotter.add_text(
             text, 
@@ -1143,50 +1228,161 @@ class RobotCanvas(QtWidgets.QWidget):
             name="live_point_hud",
             shadow=True
         )
-        self.plotter.render()
+        if render:
+            self.plotter.render()
 
-    def update_transforms(self, robot):
-        """Updates all actor transforms based on robot's current kinematics state."""
+    def update_live_point_marker(self, point_world, render=True):
+        """Draw or move a small ball marker at the live point in world coordinates.
+
+        Respects ``_live_point_marker_visible``; if False the marker is removed
+        and the position update is skipped until visibility is restored.
+        """
+        if not getattr(self, '_live_point_marker_visible', True):
+            # Ensure the actor is hidden while the toggle is off
+            try:
+                self.plotter.remove_actor("live_point_marker")
+            except Exception:
+                pass
+            return
+
+        point_world = np.array(point_world, dtype=float)
+        rounded = tuple(np.round(point_world, 3))
+        if self._last_live_point_marker == rounded:
+            return
+
+        self._last_live_point_marker = rounded
+
+        # OPTIMIZATION: Do not recreate the mesh every tick. Move the actor instead.
+        if "live_point_marker" not in self.plotter.renderer.actors:
+            radius = max(self.grid_units_per_cm * 1.2, 0.5)
+            # Create sphere at origin ONCE
+            sphere = pv.Sphere(radius=radius, center=(0, 0, 0))
+            self.plotter.add_mesh(
+                sphere,
+                color="#d32f2f",
+                opacity=0.95,
+                smooth_shading=True,
+                name="live_point_marker",
+                pickable=False,
+                render_points_as_spheres=True,
+            )
+        
+        # Translate the actor using a 4x4 matrix
+        mat = np.eye(4)
+        mat[:3, 3] = point_world
+        self.plotter.renderer.actors["live_point_marker"].user_matrix = mat
+        if render:
+            self.plotter.render()
+
+    def toggle_live_point_marker(self):
+        """Toggle the red live-point sphere on or off.
+
+        Returns the new visibility state (True = visible).
+        """
+        self._live_point_marker_visible = not getattr(self, '_live_point_marker_visible', True)
+        if not self._live_point_marker_visible:
+            # Hide immediately
+            try:
+                self.plotter.remove_actor("live_point_marker")
+            except Exception:
+                pass
+            self.plotter.render()
+        else:
+            # Force a redraw on the next update_live_point_marker call
+            self._last_live_point_marker = None
+        return self._live_point_marker_visible
+
+    def clear_live_point_marker(self):
+        """Remove the live point marker from the scene."""
+        self._last_live_point_marker = None
+        try:
+            self.plotter.remove_actor("live_point_marker")
+        except Exception:
+            pass
+
+    def update_transforms(self, robot, render=True):
+        """Updates VTK actor matrices based on the robot's current kinematics."""
         for name, link in robot.links.items():
             if name in self.actors:
-                self.actors[name].user_matrix = link.t_world
-        self.plotter.render()
-
+                self.actors[name].user_matrix = np.array(link.t_world, dtype=float)
+        if render:
+            self.plotter.render()
 
     def _init_custom_grids(self):
-        """Creates the 3 principal plane grids for the '3D Graph' system."""
-        # Clean up existing grids if any
+        """Create the three orthogonal workspace grids used by the canvas."""
         if hasattr(self, 'grids'):
             for actor in self.grids.values():
-                self.plotter.remove_actor(actor)
-        
+                try:
+                    self.plotter.remove_actor(actor)
+                except Exception:
+                    pass
+
         self.grids = {}
-        # Dynamic size: grid_cm_size * units_per_cm
         size = self.grid_cm_size * self.grid_units_per_cm
-        # Performance Cap: Avoid GPU freeze on massive scales
-        res = min(int(self.grid_cm_size), 500) 
-        
-        # 1. XY Grid (Bottom/Top) - Blueish tint
-        xy_mesh = pv.Plane(center=(0, 0, 0), direction=(0, 0, 1), i_size=size, j_size=size, i_resolution=res, j_resolution=res)
-        self.grids['xy'] = self.plotter.add_mesh(xy_mesh, color="#e3f2fd", opacity=0.3, 
-                                               show_edges=True, edge_color="#1565c0", line_width=1,
-                                               name="grid_xy", pickable=True, lighting=False)
-        
-        # 2. XZ Grid (Front/Back) - Greenish tint
-        xz_mesh = pv.Plane(center=(0, 0, 0), direction=(0, 1, 0), i_size=size, j_size=size, i_resolution=res, j_resolution=res)
-        self.grids['xz'] = self.plotter.add_mesh(xz_mesh, color="#e8f5e9", opacity=0.3, 
-                                               show_edges=True, edge_color="#2e7d32", line_width=1,
-                                               name="grid_xz", pickable=True, lighting=False)
-        
-        # 3. YZ Grid (Left/Right) - Reddish tint
-        yz_mesh = pv.Plane(center=(0, 0, 0), direction=(1, 0, 0), i_size=size, j_size=size, i_resolution=res, j_resolution=res)
-        self.grids['yz'] = self.plotter.add_mesh(yz_mesh, color="#ffebee", opacity=0.3, 
-                                               show_edges=True, edge_color="#c62828", line_width=1,
-                                               name="grid_yz", pickable=True, lighting=False)
-        
-        # Initially hide all except XY
-        for name, actor in self.grids.items():
-            actor.SetVisibility(bool(name == 'xy'))
+        res = min(int(self.grid_cm_size), 500)
+
+        xy_mesh = pv.Plane(
+            center=(0, 0, 0),
+            direction=(0, 0, 1),
+            i_size=size,
+            j_size=size,
+            i_resolution=res,
+            j_resolution=res,
+        )
+        self.grids['xy'] = self.plotter.add_mesh(
+            xy_mesh,
+            color="#e3f2fd",
+            opacity=0.3,
+            show_edges=True,
+            edge_color="#1565c0",
+            line_width=1,
+            name="grid_xy",
+            pickable=True,
+            lighting=False,
+        )
+
+        xz_mesh = pv.Plane(
+            center=(0, 0, 0),
+            direction=(0, 1, 0),
+            i_size=size,
+            j_size=size,
+            i_resolution=res,
+            j_resolution=res,
+        )
+        self.grids['xz'] = self.plotter.add_mesh(
+            xz_mesh,
+            color="#e8f5e9",
+            opacity=0.3,
+            show_edges=True,
+            edge_color="#2e7d32",
+            line_width=1,
+            name="grid_xz",
+            pickable=True,
+            lighting=False,
+        )
+
+        yz_mesh = pv.Plane(
+            center=(0, 0, 0),
+            direction=(1, 0, 0),
+            i_size=size,
+            j_size=size,
+            i_resolution=res,
+            j_resolution=res,
+        )
+        self.grids['yz'] = self.plotter.add_mesh(
+            yz_mesh,
+            color="#ffebee",
+            opacity=0.3,
+            show_edges=True,
+            edge_color="#c62828",
+            line_width=1,
+            name="grid_yz",
+            pickable=True,
+            lighting=False,
+        )
+
+        for grid_name, actor in self.grids.items():
+            actor.SetVisibility(bool(grid_name == 'xy'))
 
     def _init_axis_labels(self):
         """Creates distance labels along the center axis lines (through origin)."""
@@ -1298,6 +1494,24 @@ class RobotCanvas(QtWidgets.QWidget):
         self.grid_units_per_cm = float(units_per_cm)
         self._refresh_grid_visuals()
 
+    def measure_actor_bounds(self, name):
+        """Returns exact bounding-box dimensions for an actor in internal units and cm."""
+        if name not in self.actors:
+            return None
+
+        bounds = self.actors[name].GetBounds()
+        dims_internal = np.array(
+            [bounds[1] - bounds[0], bounds[3] - bounds[2], bounds[5] - bounds[4]],
+            dtype=float,
+        )
+        dims_cm = dims_internal / max(self.grid_units_per_cm, 1e-9)
+        return {
+            "bounds": bounds,
+            "dims_internal": dims_internal,
+            "dims_cm": dims_cm,
+            "internal_unit": self.internal_unit_name,
+        }
+
     def ensure_grid_fits_bounds(self, bounds):
         """Checks if the component bounds exceed the current grid and expands it if necessary."""
         # bounds = (xmin, xmax, ymin, ymax, zmin, zmax)
@@ -1379,9 +1593,17 @@ class RobotCanvas(QtWidgets.QWidget):
             gv = bool(grid_vis.get(lbl['grid'], False))
             # Visibility condition: matches target step and grid is visible
             tv = (cm_val % target_step_cm) == 0
-            lbl['actor'].SetVisibility(bool(gv and tv))
+            new_vis = bool(gv and tv)
+            if lbl['actor'].GetVisibility() != new_vis:
+                lbl['actor'].SetVisibility(new_vis)
 
     def _on_camera_change(self, *args):
+        import time
+        now = time.time()
+        if hasattr(self, '_last_cam_update') and (now - getattr(self, '_last_cam_update')) < 0.05:
+            return
+        self._last_cam_update = now
+
         """Dynamically toggles grid visibility based on camera orientation."""
         if not hasattr(self, 'grids'):
             return

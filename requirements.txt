@@ -5,3 +5,7 @@ trimesh
 numpy
 pyserial
 cascadio
+scipy
+ikpy
+sympy
+spatialmath-python

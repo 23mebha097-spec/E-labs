@@ -2,6 +2,7 @@ from PyQt5 import QtWidgets, QtCore, QtGui
 import time
 import os
 import re
+import numpy as np
 
 
 class RobotSyntaxHighlighter(QtGui.QSyntaxHighlighter):
@@ -57,12 +58,16 @@ class RobotSyntaxHighlighter(QtGui.QSyntaxHighlighter):
                 r'\bin\b', r'\bnot\b', r'\band\b', r'\bor\b', r'\bTrue\b',
                 r'\bFalse\b', r'\bNone\b', r'\btry\b', r'\bexcept\b', r'\bwith\b',
                 r'\bas\b', r'\blambda\b', r'\byield\b', r'\bpass\b', r'\bbreak\b',
-                r'\bcontinue\b', r'\braise\b',
+                r'\bcontinue\b', r'\braise\b', r'\bglobal\b', r'\bnonlocal\b',
+                r'\bassert\b', r'\bdel\b', r'\bimport\b', r'\bwith\b'
             ]
             for kw in py_keywords:
                 self.rules.append((re.compile(kw), keyword_fmt))
-            # Builtins
-            for bi in [r'\bprint\b', r'\brange\b', r'\blen\b', r'\bint\b', r'\bfloat\b', r'\bstr\b']:
+            # Builtins & Robot API
+            for bi in [r'\bprint\b', r'\brange\b', r'\blen\b', r'\bint\b', r'\bfloat\b', r'\bstr\b',
+                       r'\brobot\.move\b', r'\brobot\.move_xyz\b', r'\brobot\.wait\b', 
+                       r'\brobot\.home\b', r'\brobot\.get_joint\b', r'\brobot\.get_tcp\b',
+                       r'\brobot\.set_speed\b', r'\brobot\.log\b']:
                 self.rules.append((re.compile(bi), builtin_fmt))
             # Function calls
             self.rules.append((re.compile(r'\b[a-zA-Z_]\w*(?=\s*\()'), func_fmt))
@@ -75,10 +80,11 @@ class RobotSyntaxHighlighter(QtGui.QSyntaxHighlighter):
         elif self.lang == "matlab":
             # Matlab keywords
             for kw in [r'\bfunction\b', r'\bend\b', r'\bif\b', r'\belse\b', r'\bfor\b',
-                        r'\bwhile\b', r'\breturn\b', r'\bpause\b']:
+                        r'\bwhile\b', r'\breturn\b', r'\bpause\b', r'\bglobal\b', r'\bpersistent\b']:
                 self.rules.append((re.compile(kw, re.IGNORECASE), keyword_fmt))
-            # Function calls
-            self.rules.append((re.compile(r'\bjoint\b', re.IGNORECASE), builtin_fmt))
+            # Builtin commands
+            for bi in [r'\bjoint\b', r'\bmove_xyz\b', r'\bhome\b', r'\bset_speed\b', r'\bclc\b']:
+                self.rules.append((re.compile(bi, re.IGNORECASE), builtin_fmt))
             # Strings
             self.rules.append((re.compile(r"'[^']*'"), string_fmt))
             # Comments
@@ -216,9 +222,87 @@ class ProgramPanel(QtWidgets.QWidget):
 
         # Example templates for each language
         self.templates = {
-            "command": "# Command format: JOINT Name Angle\nJOINT Shoulder 45\nWAIT 1.0\nJOINT Shoulder -45\nWAIT 1.0\n",
-            "python": "# Python API: robot.move('Name', Angle)\nrobot.move('Shoulder', 45)\nrobot.wait(1.0)\nrobot.move('Shoulder', -45)\nrobot.wait(1.0)\n",
-            "matlab": "% Matlab Syntax: joint('Name', Angle)\njoint('Shoulder', 45);\npause(1.0);\njoint('Shoulder', -45);\npause(1.0);\n"
+            "command": (
+                "# ROBOT COMMAND SEQUENCE\n"
+                "SPEED 60          # Set speed to 60%\n"
+                "HOME              # Move to home position\n"
+                "WAIT 1.0          # Wait 1s\n"
+                "\n"
+                "# Move to Cartesian Target\n"
+                "MOVE 20.0 15.0 10.0\n"
+                "WAIT 0.5\n"
+                "\n"
+                "# Direct Joint Control\n"
+                "JOINT Shoulder 45\n"
+                "JOINT Elbow -30\n"
+                "WAIT 1.0\n"
+            ),
+            "python": (
+                "# ============================================================\n"
+                "# E-labs Python Robot API - Professional Scripting\n"
+                "# Use 'robot' object to control the 3D simulation.\n"
+                "# \n"
+                "# MOVEMENT:\n"
+                "#   robot.move('JointName', angle)  - Smooth joint rotation\n"
+                "#   robot.move_xyz(x, y, z)         - Smooth Cartesian movement (IK)\n"
+                "#   robot.home()                    - Reset to zero position\n"
+                "#   robot.wait(seconds)             - Non-blocking delay\n"
+                "# \n"
+                "# QUERY STATE:\n"
+                "#   val = robot.get_joint('Name')   - Get current angle\n"
+                "#   pos = robot.get_tcp()           - Get end-effector [x,y,z]\n"
+                "#   names = robot.get_joint_names() - List of all joints\n"
+                "# \n"
+                "# UTILS:\n"
+                "#   robot.set_speed(%)              - Set animation speed\n"
+                "#   robot.log('message')            - Print to system console\n"
+                "# ============================================================\n"
+                "import math\n"
+                "\n"
+                "robot.set_speed(80)\n"
+                "robot.log('Starting pick-and-place sequence...')\n"
+                "robot.home()\n"
+                "robot.wait(0.5)\n"
+                "\n"
+                "# Move to specific coordinates\n"
+                "robot.move_xyz(10, 15, 20)\n"
+                "robot.wait(0.5)\n"
+                "\n"
+                "# Rotate specific joint\n"
+                "joints = robot.get_joint_names()\n"
+                "if joints:\n"
+                "    robot.move(joints[0], 45)\n"
+                "\n"
+                "robot.log('Sequence finished.')\n"
+                "robot.home()\n"
+            ),
+            "matlab": (
+                "% ============================================================\n"
+                "% E-labs MATLAB/Octave Notation Script\n"
+                "% \n"
+                "% Available commands:\n"
+                "%   joint('Name', angle);     - Smooth joint rotation\n"
+                "%   move_xyz(x, y, z);        - Smooth Cartesian IK\n"
+                "%   home();                   - Reset robot\n"
+                "%   pause(seconds);           - Delay\n"
+                "%   set_speed(percent);       - Set speed\n"
+                "%   clc;                      - Clear console\n"
+                "% ============================================================\n"
+                "\n"
+                "set_speed(70);\n"
+                "home();\n"
+                "pause(1.0);\n"
+                "\n"
+                "% Move End-Effector to Point\n"
+                "move_xyz(15, 0, 25);\n"
+                "pause(0.5);\n"
+                "\n"
+                "% Manual joint override\n"
+                "joint('Joint1', -30);\n"
+                "pause(0.5);\n"
+                "\n"
+                "home();\n"
+            )
         }
 
         self.init_ui()
@@ -398,12 +482,64 @@ class ProgramPanel(QtWidgets.QWidget):
         class RobotAPI:
             def __init__(self, panel):
                 self.panel = panel
+            
             def move(self, joint_name, angle):
+                """Moves a joint smoothly and waits for completion."""
                 if not self.panel.is_running: return
-                self.panel.execute_line(f"JOINT {joint_name} {angle}")
+                self.panel.mw.move_joint_animated(joint_name, angle, blocking=True)
+            
+            def move_xyz(self, x, y, z):
+                """Moves End-Effector to [x,y,z] via IK smoothly and waits."""
+                if not self.panel.is_running: return
+                tcp_link = self.panel.mw._get_preferred_tcp_link()
+                if tcp_link:
+                    self.panel.mw._move_tcp_to_xyz(x, y, z, tcp_link, blocking=True)
+            
             def wait(self, seconds):
+                """Waits while keeping UI alive."""
                 if not self.panel.is_running: return
-                self.panel.execute_line(f"WAIT {seconds}")
+                start = time.time()
+                while time.time() - start < seconds and self.panel.is_running:
+                    QtWidgets.QApplication.processEvents()
+                    time.sleep(0.01)
+            
+            def home(self):
+                """Smoothly returns all joints to zero."""
+                if not self.panel.is_running: return
+                joint_ids = list(self.panel.mw.robot.joints.keys())
+                child_names = [j.child_link.name for j in self.panel.mw.robot.joints.values() if j.child_link]
+                targets = [0.0] * len(joint_ids)
+                self.panel.mw._start_joint_animation(joint_ids, child_names, targets, blocking=True)
+            
+            def get_joint(self, name):
+                """Returns current joint angle."""
+                if name in self.panel.mw.robot.joints:
+                    return float(self.panel.mw.robot.joints[name].current_value)
+                return 0.0
+            
+            def get_joint_names(self):
+                """Returns list of all joint names."""
+                return list(self.panel.mw.robot.joints.keys())
+
+            def get_tcp(self):
+                """Returns end-effector [x,y,z] in CM."""
+                ratio = getattr(self.panel.mw.canvas, "grid_units_per_cm", 1.0)
+                tcp_link = self.panel.mw._get_preferred_tcp_link()
+                if tcp_link:
+                    pos, _, _ = self.panel.mw.get_link_tool_point(tcp_link)
+                    return (pos / ratio).tolist()
+                return [0.0, 0.0, 0.0]
+            
+            def set_speed(self, percent):
+                """Sets the animation speed (0-100)."""
+                self.panel.mw.on_speed_change(float(np.clip(percent, 0, 100)))
+            
+            def log(self, msg):
+                self.panel.mw.log(str(msg))
+            
+            def clear(self):
+                self.panel.mw.console.clear()
+
 
         api = RobotAPI(self)
         try:
@@ -420,137 +556,112 @@ class ProgramPanel(QtWidgets.QWidget):
             line = line.strip()
             if not line or line.startswith("%"): continue
 
-            # Simple regex for joint('name', value)
             joint_match = re.match(r"joint\s*\(['\"](.+?)['\"]\s*,\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
-            # Simple regex for pause(value)
+            move_xyz_match = re.match(r"move_xyz\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
             pause_match = re.match(r"pause\s*\((-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
 
             if joint_match:
                 name = joint_match.group(1)
-                val = joint_match.group(2)
-                self.execute_line(f"JOINT {name} {val}")
+                val = float(joint_match.group(2))
+                self.mw.move_joint_animated(name, val, blocking=True)
+            elif move_xyz_match:
+                x = float(move_xyz_match.group(1))
+                y = float(move_xyz_match.group(2))
+                z = float(move_xyz_match.group(3))
+                tcp_link = self.mw._get_preferred_tcp_link()
+                if tcp_link:
+                    self.mw._move_tcp_to_xyz(x, y, z, tcp_link, blocking=True)
             elif pause_match:
-                val = pause_match.group(1)
-                self.execute_line(f"WAIT {val}")
+                val = float(pause_match.group(1))
+                start = time.time()
+                while time.time() - start < val and self.is_running:
+                    QtWidgets.QApplication.processEvents()
+                    time.sleep(0.01)
+            elif re.match(r"home\s*\(\s*\);?", line, re.IGNORECASE):
+                joint_ids = list(self.mw.robot.joints.keys())
+                child_names = [j.child_link.name for j in self.mw.robot.joints.values() if j.child_link]
+                targets = [0.0] * len(joint_ids)
+                self.mw._start_joint_animation(joint_ids, child_names, targets, blocking=True)
+            elif re.match(r"set_speed\s*\(\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE):
+                speed_match = re.match(r"set_speed\s*\(\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
+                self.mw.on_speed_change(float(speed_match.group(1)))
+            elif re.match(r"clc\s*\(\s*\);?", line, re.IGNORECASE) or line.lower() == "clc":
+                self.mw.console.clear()
             else:
                 self.mw.log(f"Matlab Parser: Skipping unknown line: {line}")
 
+
+    def _move_tcp_to_xyz(self, x_cm, y_cm, z_cm):
+        """Moves the current TCP to an XYZ target in centimeters using the robot IK solver."""
+        if not self.mw.robot.joints:
+            self.mw.log("⚠️ No robot joints defined for MOVE!")
+            return
+        
+        # Get TCP link
+        tcp_link = self.mw._get_preferred_tcp_link()
+        if not tcp_link:
+            self.mw.log("⚠️ No TCP link found for MOVE!")
+            return
+
+        success, info = self.mw._move_tcp_to_xyz(x_cm, y_cm, z_cm, tcp_link)
+        if not success:
+            self.mw.log(f"❌ MOVE failed to reach ({x_cm}, {y_cm}, {z_cm})")
+
     def stop_program(self):
-        """Stops script execution."""
+        """Stops the current execution."""
         if self.is_running:
             self.is_running = False
-            self.mw.log("🛑 EXECUTION STOPPED BY USER.")
+            self.mw.log("🛑 SIMULATION STOPPED BY USER.")
 
     def execute_line(self, line):
-        """Core parsing and execution logic for a single line of code."""
+        """
+        Parses and executes a single line of robot command.
+        Commands:
+          JOINT Name Angle
+          MOVE X Y Z
+          WAIT Seconds
+          SPEED Percent
+          HOME
+        """
+        if not self.is_running: return
+        
+        parts = line.split()
+        if not parts: return
+        
+        cmd = parts[0].upper()
+        
         try:
-            parts = line.split()
-            if not parts: return
-            original_line = line
-
-            # 1. Use global universal speed
-            speed = float(self.mw.current_speed)
-
-            # Search for and handle optional 'SPEED' parameter
-            upper_parts = [p.upper() for p in parts]
-            if "SPEED" in upper_parts:
-                s_idx = upper_parts.index("SPEED")
-                if len(parts) > s_idx + 1:
-                    try:
-                        speed = float(parts[s_idx + 1])
-                        self.mw.log(f"⚡ Override Speed: {speed}%")
-                    except ValueError:
-                        self.mw.log(f"⚠️ Invalid speed value: {parts[s_idx+1]}")
-                parts = parts[:s_idx]
-
-            # 2. Identify Command and Joint Name
-            cmd = parts[0].upper()
-            j_name = ""
-            val = 0.0
-
-            if cmd == "WAIT":
-                if len(parts) >= 2:
-                    val = float(parts[1])
-            elif cmd == "JOINT":
-                if len(parts) >= 3:
-                    j_name = parts[1]
-                    val = float(parts[2])
-            elif cmd == "HOME":
-                self.mw.reset_to_home()
-                return
-            else:
-                # Potential Shorthand: Name Value
-                if len(parts) >= 2:
-                    potential_name = parts[0]
-                    if potential_name in self.mw.robot.joints:
-                        cmd = "JOINT"
-                        j_name = potential_name
-                        val = float(parts[1])
-                    else:
-                        self.mw.log(f"❓ Unknown joint or command: {potential_name}")
-                        return
-                else:
-                    return
-
-            if cmd == "JOINT":
-                if j_name in self.mw.robot.joints:
-                    joint = self.mw.robot.joints[j_name]
-
-                    # --- SAFETY CHECK ---
-                    if val < joint.min_limit or val > joint.max_limit:
-                        self.mw.log(f"⚠️ SAFETY SKIP: {j_name} command ({val}) is outside limits")
-                        return
-
-                    start_val = joint.current_value
-                    target_val = val
-
-                    if speed > 0:
-                        # Interpolate rotation FOR SIMULATION ONLY
-                        diff = target_val - start_val
-                        steps = int(abs(diff) / (speed * 0.1))
-                        if steps > 0:
-                            step_inc = diff / steps
-                            for _ in range(steps):
-                                if not self.is_running: return
-                                joint.current_value += step_inc
-                                self.mw.robot.update_kinematics()
-                                self.mw.canvas.update_transforms(self.mw.robot)
-                                # Ghost shadow
-                                try:
-                                    _l = joint.child_link
-                                    import numpy as _np2
-                                    self.mw.canvas.add_joint_ghost(
-                                        _l.name,
-                                        mesh=_l.mesh,
-                                        transform=_np2.copy(_l.t_world),
-                                        color=getattr(_l, 'color', '#888888') or '#888888'
-                                    )
-                                except Exception:
-                                    pass
-
-                                QtWidgets.QApplication.processEvents()
-                                time.sleep(0.1)
-
-                    # Set final precise value
-                    if not self.is_running: return
-                    joint.current_value = target_val
-                    self.mw.robot.update_kinematics()
-                    self.mw.canvas.update_transforms(self.mw.robot)
-                    if hasattr(self.mw, 'show_speed_overlay'):
-                        self.mw.show_speed_overlay()
-                    QtWidgets.QApplication.processEvents()
-
-            elif cmd == "WAIT":
-                # Sleep in small chunks to allow stopping
-                wait_time = val
-                start_wait = time.time()
-                while time.time() - start_wait < wait_time:
-                    if not self.is_running: break
+            if cmd == "JOINT" and len(parts) >= 3:
+                name = parts[1]
+                angle = float(parts[2])
+                self.mw.joint_tab.apply_joint_rotation(name, angle)
+                # Small delay for visual smoothiness in loop
+                QtWidgets.QApplication.processEvents()
+                time.sleep(0.01)
+                
+            elif cmd == "MOVE" and len(parts) >= 4:
+                x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                self._move_tcp_to_xyz(x, y, z)
+                QtWidgets.QApplication.processEvents()
+                
+            elif cmd == "WAIT" and len(parts) >= 2:
+                sec = float(parts[1])
+                # Non-blocking wait to keep UI responsive
+                start = time.time()
+                while time.time() - start < sec and self.is_running:
                     QtWidgets.QApplication.processEvents()
                     time.sleep(0.05)
+            
+            elif cmd == "SPEED" and len(parts) >= 2:
+                speed = float(parts[1])
+                self.mw.current_speed = np.clip(speed, 0, 100)
+                if hasattr(self.mw, 'speed_slider'):
+                    self.mw.speed_slider.setValue(int(self.mw.current_speed))
+                self.mw.log(f"Speed set to {self.mw.current_speed}%")
 
-            elif cmd == "MOVE":
-                self.mw.log(f"CMD: {original_line} (IK implementation pending)")
-
+            elif cmd == "HOME":
+                self.mw.reset_to_home()
+                QtWidgets.QApplication.processEvents()
+                
         except Exception as e:
-            self.mw.log(f"Error executing line: {line} -> {str(e)}")
+            self.mw.log(f"Execution Error in line '{line}': {e}")

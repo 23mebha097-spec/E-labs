@@ -288,36 +288,30 @@ class MatricesPanel(QtWidgets.QWidget):
         html = """
         <style>
             .container { padding: 15px; background-color: #ffffff; }
-            .matrix-box { 
-                border: 1px solid #e2e8f0; 
-                border-radius: 12px; 
-                margin-bottom: 28px; 
+
+            /* ── Per-joint Cumulative T0 Matrix ── */
+            .matrix-box {
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                margin-bottom: 24px;
                 overflow: hidden;
-                box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+                box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.07);
             }
             .box-header {
                 background-color: #2563eb;
                 color: #ffffff;
                 font-family: 'Segoe UI', sans-serif;
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: 700;
-                padding: 12px 18px;
+                padding: 11px 18px;
                 letter-spacing: 1px;
-            }
-            .meta-row {
-                padding: 8px 12px;
-                background-color: #eff6ff;
-                color: #1e3a8a;
-                font-family: 'Segoe UI', sans-serif;
-                font-size: 13px;
-                border-bottom: 1px solid #dbeafe;
             }
             .sub-head {
                 padding: 8px 12px;
                 background-color: #f8fafc;
                 color: #334155;
                 font-family: 'Segoe UI', sans-serif;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 700;
                 border-top: 1px solid #e2e8f0;
                 border-bottom: 1px solid #e2e8f0;
@@ -330,7 +324,7 @@ class MatricesPanel(QtWidgets.QWidget):
                 background-color: #f1f5f9;
                 color: #475569;
                 font-family: 'Segoe UI', sans-serif;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 800;
                 text-transform: uppercase;
                 padding: 10px 8px;
@@ -341,20 +335,15 @@ class MatricesPanel(QtWidgets.QWidget):
             .matrix-grid td {
                 background-color: #ffffff;
                 border: none;
-                padding: 12px 8px;
+                padding: 11px 8px;
                 text-align: center;
                 font-family: 'Consolas', monospace;
-                font-size: 17px;
+                font-size: 16px;
                 color: #0f172a;
                 font-weight: 600;
             }
-            .matrix-grid tr:nth-child(even) td {
-                background-color: #f8fafc;
-            }
-            .matrix-grid td.t-col {
-                color: #2563eb;
-                font-weight: 800;
-            }
+            .matrix-grid tr:nth-child(even) td { background-color: #f8fafc; }
+            .matrix-grid td.t-col { color: #2563eb; font-weight: 800; }
             .warn {
                 color: #b91c1c;
                 font-size: 12px;
@@ -367,32 +356,41 @@ class MatricesPanel(QtWidgets.QWidget):
         <div class="container">
         """
 
+        # ── Per-joint Cumulative T0 Transform Matrices ──
         for idx, result in enumerate(fk_results, start=1):
-            local_ok, local_det = self._validate_homogeneous_matrix(result["local"])
             cum_ok, cum_det = self._validate_homogeneous_matrix(result["cumulative"])
+
+            # Pivot Point: read directly from the 3D engine's world-space joint origin.
+            joint_obj = ordered_joints[idx - 1]
+            origin_world = (joint_obj.parent_link.t_world @ np.append(
+                np.array(joint_obj.origin, dtype=float), 1.0))[:3]
+            px = origin_world[0] / ratio
+            py = origin_world[1] / ratio
+            pz = origin_world[2] / ratio
 
             html += f'<div class="matrix-box">'
             html += f'  <div class="box-header">{result["title"]}</div>'
-
-            # Interpret the internal units (meters) directly to cm by multiplying by 100
-            joint = ordered_joints[idx - 1]
-            ox, oy, oz = joint.origin
-            ox, oy, oz = ox * 100, oy * 100, oz * 100
-            html += f"<div class='sub-head'>Local A{idx} <span style='font-weight:normal; color:#64748b; font-size:12px; margin-left:10px;'>(Origin: {ox:.3f}, {oy:.3f}, {oz:.3f} cm)</span></div>"
-            html += self.format_matrix_html(result["local"])
-
-            html += "<div class='sub-head'>Cumulative T0{}</div>".format(idx)
+            html += (
+                f"<div class='sub-head'>Cumulative T0{idx}"
+                f"<span style='font-weight:normal; color:#64748b; font-size:11px; margin-left:10px;'>"
+                f"Pivot Point: ({px:.3f}, {py:.3f}, {pz:.3f}) cm"
+                f"</span></div>"
+            )
             html += self.format_matrix_html(result["cumulative"])
 
-            if not local_ok or not cum_ok:
+            if not cum_ok:
                 html += (
                     f"<div class='warn'>Validation warning: "
-                    f"det(A{idx}.R)={local_det:.6f}, det(T0{idx}.R)={cum_det:.6f}</div>"
+                    f"det(T0{idx}.R)={cum_det:.6f}</div>"
                 )
             html += '</div>'
-        
+
         html += "</div>"
         self.text_area.setHtml(html)
+
+        # Sync with Result Tab (Summary View)
+        if hasattr(self.mw, 'experiment_tab') and hasattr(self.mw.experiment_tab, 'result_tab'):
+            self.mw.experiment_tab.result_tab.update_display(fk_results)
 
     def format_matrix_html(self, mat):
         mat_display = self._clean_display_matrix(mat)

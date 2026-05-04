@@ -32,87 +32,176 @@ class ResultPanel(QtWidgets.QWidget):
         )
         layout.addWidget(self.result_view)
 
-    def update_display(self, chain=None, T=None):
-        if chain is None or T is None:
+    def update_display(self, fk_results=None):
+        if not fk_results:
             self.result_view.setHtml(
                 "<div style='margin-top: 50px; text-align: center;'>"
                 "<p style='color:#b0bec5; font-size: 18px; font-style: italic;'>No computation data available.</p>"
-                "<p style='color:#cfd8dc; font-size: 14px;'>Run Forward Kinematics in the 'IK and FK' tab to see results here.</p>"
+                "<p style='color:#cfd8dc; font-size: 14px;'>Adjust joint rotations or run IK/FK to see results here.</p>"
                 "</div>"
             )
             return
 
+        # Use the globally accurate live point if available, otherwise fall back to DH calculation
+        p = getattr(self.mw, "current_live_point_cm", None)
+        if p is None:
+            # Fallback to DH-based end-effector position
+            ee_result = fk_results[-1]
+            p = ee_result["cumulative"][:3, 3]
+
+        # Calculate the 4x4 Transform Matrix
+        T_matrix = None
+        if hasattr(self.mw, "robot") and hasattr(self.mw, "_get_preferred_tcp_link"):
+            tcp_link = getattr(self.mw, "_get_preferred_tcp_link")()
+            if tcp_link:
+                T_raw = self.mw.robot.get_tcp_world_pose(tcp_link).copy()
+                ratio = getattr(self.mw.canvas, "grid_units_per_cm", 1.0) or 1.0
+                T_raw[:3, 3] /= ratio
+                T_matrix = T_raw
+
+        if T_matrix is None:
+            ee_result = fk_results[-1]
+            T_matrix = ee_result["cumulative"]
+
         html = """
         <style>
             body { font-family: 'Segoe UI', sans-serif; background-color: #ffffff; }
-            .box { 
-                border: 1px solid #e1e8ed; 
+            .section-box { 
+                border: 1px solid #e2e8f0; 
                 border-radius: 12px; 
-                margin: 20px 0; 
+                margin-bottom: 25px; 
                 background: #ffffff;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+                box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05);
+                overflow: hidden;
             }
-            .head { 
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1976d2, stop:1 #1565c0); 
+            .section-head { 
+                background: #1e3a8a; 
                 color: #ffffff; 
                 font-weight: 700; 
                 font-size: 16px; 
                 padding: 12px 16px; 
-                border-top-left-radius: 11px;
-                border-top-right-radius: 11px;
             }
-            .matrix-container { padding: 10px; }
-            .matrix { width: 100%; border-collapse: collapse; margin: 5px 0; }
-            .matrix td, .matrix th { text-align: center; padding: 10px; font-family: 'Consolas', 'Courier New', monospace; font-size: 14px; }
-            .matrix th { background: #f8fbff; color: #546e7a; font-weight: 800; border-bottom: 2px solid #e3f2fd; }
-            .matrix tr:nth-child(even) td { background: #fafcfe; }
-            .matrix td { color: #263238; border-bottom: 1px solid #f0f4f8; }
-            .matrix td:last-child { color: #1976d2; font-weight: 700; }
+            .pos-container { 
+                padding: 24px; 
+                background: #f8fafc;
+                display: flex;
+                justify-content: space-around;
+                align-items: center;
+            }
+            .pos-item { 
+                font-size: 28px; 
+                color: #1e40af; 
+                font-family: 'Consolas', monospace; 
+                font-weight: 700;
+            }
+            .pos-label { 
+                color: #94a3b8; 
+                font-size: 14px; 
+                font-weight: 600; 
+                text-transform: uppercase;
+                margin-right: 8px;
+            }
             
-            .summary-box { 
-                background: #f1f8ff; 
-                padding: 20px; 
-                border-radius: 12px; 
-                margin-top: 25px; 
-                border: 1px solid #bbdefb;
+            .matrix-table {
+                width: 100%;
+                border-collapse: collapse;
+                background: #f8fafc;
             }
-            .summary-title { margin-top:0; color:#1565c0; font-size: 18px; font-weight: 700; }
-            .pos-item { font-size: 20px; color:#0d47a1; font-family: 'Consolas', monospace; margin: 5px 0; }
-            .pos-label { color: #546e7a; font-size: 14px; font-weight: normal; width: 30px; display: inline-block; }
+            .matrix-table td {
+                padding: 12px;
+                text-align: center;
+                font-family: 'Consolas', monospace;
+                font-size: 16px;
+                color: #1e293b;
+                border: 1px solid #e2e8f0;
+            }
+            .matrix-table tr:nth-child(even) td { background: #f1f5f9; }
+            
+            .dh-table { 
+                width: 100%; 
+                border-collapse: collapse; 
+            }
+            .dh-table th { 
+                background: #f1f5f9; 
+                color: #475569; 
+                font-weight: 800; 
+                padding: 12px;
+                border-bottom: 2px solid #e2e8f0;
+                text-align: center;
+                font-size: 13px;
+                text-transform: uppercase;
+            }
+            .dh-table td { 
+                padding: 12px; 
+                text-align: center; 
+                border-bottom: 1px solid #f1f5f9;
+                font-family: 'Consolas', monospace;
+                font-size: 15px;
+                color: #1e293b;
+            }
+            .dh-table tr:nth-child(even) td { background: #fafafa; }
+            .dh-table td.joint-name { 
+                text-align: left; 
+                font-weight: 700; 
+                color: #1e3a8a;
+                background: #eff6ff !important;
+            }
         </style>
         """
 
-        # Final End-Effector Pose
+        # 1. Live Point Position Section
         html += (
-            f"<div class='box' style='border: 2px solid #1976d2;'>"
-            f"<div class='head' style='background:#0d47a1;'>End-Effector Pose Matrix (T_Total)</div>"
-            f"<div class='matrix-container'>{self._matrix_html(T)}</div>"
+            f"<div class='section-box'>"
+            f"<div class='section-head'>Live Point Position</div>"
+            f"<div class='pos-container'>"
+            f"<span class='pos-item'><span class='pos-label'>X:</span>{p[0]:.3f}</span>"
+            f"<span class='pos-item'><span class='pos-label'>Y:</span>{p[1]:.3f}</span>"
+            f"<span class='pos-item'><span class='pos-label'>Z:</span>{p[2]:.3f}</span>"
+            f"</div>"
             f"</div>"
         )
         
-        # Position Summary
-        p = T[:3, 3]
+        # 2. Transform Matrix Section
         html += (
-            f"<div class='summary-box'>"
-            f"<div class='summary-title'>End-Effector Position</div>"
-            f"<div class='pos-item'><span class='pos-label'>X:</span> {p[0]:.4f}</div>"
-            f"<div class='pos-item'><span class='pos-label'>Y:</span> {p[1]:.4f}</div>"
-            f"<div class='pos-item'><span class='pos-label'>Z:</span> {p[2]:.4f}</div>"
-            f"</div>"
+            f"<div class='section-box'>"
+            f"<div class='section-head'>Live Point Transform Matrix (4x4)</div>"
+            f"<table class='matrix-table'>"
+        )
+        for i in range(4):
+            html += "<tr>"
+            for j in range(4):
+                val = T_matrix[i, j]
+                # Format translation differently (with 3 decimal places) vs rotation (with 4)
+                if j == 3 and i < 3:
+                    html += f"<td>{val:8.3f}</td>"
+                else:
+                    html += f"<td>{val:8.4f}</td>"
+            html += "</tr>"
+        html += "</table></div>"
+
+        # 3. DH Matrix (Parameters Table) Section
+        html += (
+            f"<div class='section-box'>"
+            f"<div class='section-head'>DH Matrix (Parameters)</div>"
+            f"<table class='dh-table'>"
+            f"<tr><th>Joint</th><th>&theta; (deg)</th><th>d (cm)</th><th>a (cm)</th><th>&alpha; (deg)</th></tr>"
         )
 
-        self.result_view.setHtml(html)
+        for res in fk_results:
+            is_prismatic = res["joint_type"] == "prismatic"
+            theta = res["theta0_deg"] + (0 if is_prismatic else res["q_value"])
+            d = res["d"] + (res["q_value"] if is_prismatic else 0)
+            
+            html += (
+                f"<tr>"
+                f"<td class='joint-name'>{res['title']}</td>"
+                f"<td>{theta:.2f}</td>"
+                f"<td>{d:.2f}</td>"
+                f"<td>{res['a']:.2f}</td>"
+                f"<td>{res['alpha_deg']:.2f}</td>"
+                f"</tr>"
+            )
 
-    def _matrix_html(self, mat):
-        labels = ["X", "Y", "Z", "T"]
-        s = "<table class='matrix'><tr>"
-        for lbl in labels:
-            s += f"<th>{lbl}</th>"
-        s += "</tr>"
-        for row in mat:
-            s += "<tr>"
-            for val in row:
-                s += f"<td>{val: .5f}</td>"
-            s += "</tr>"
-        s += "</table>"
-        return s
+        html += "</table></div>"
+
+        self.result_view.setHtml(html)

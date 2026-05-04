@@ -1317,43 +1317,39 @@ class JointPanel(QtWidgets.QWidget):
         joint = child_link.parent_joint
         
         if joint:
-            # 1. Update the robot model state
-            joint.current_value = angle_deg
+            # 1. Update the robot model state using the shared propagation logic
+            self.mw.robot.set_joint_value(joint.name, angle_deg, propagate_relations=True)
             
-            # 2. Trigger re-calculation of all world transforms
-            # This handles multi-link chains correctly (e.g. Base -> Arm1 -> Arm2)
-            self.mw.robot.update_kinematics()
-            
-            # 3. Synchronize local JointPanel data
+            # 2. Synchronize local JointPanel data
             if child_name in self.joints:
-                self.joints[child_name]['current_angle'] = angle_deg
+                self.joints[child_name]['current_angle'] = float(joint.current_value)
                 
-            # 4. Synchronize MatricesPanel if it exists
+            # 3. Synchronize MatricesPanel if it exists
             if hasattr(self.mw, 'matrices_tab'):
-                self.mw.matrices_tab.sync_slider(child_name, angle_deg)
+                self.mw.matrices_tab.sync_slider(child_name, float(joint.current_value))
             if hasattr(self.mw, 'experiment_tab'):
-                self.mw.experiment_tab.sync_slider(child_name, angle_deg)
+                self.mw.experiment_tab.sync_slider(child_name, float(joint.current_value))
                 
-            # 5. Send command to hardware (ESP32)
+            # 4. Send command to hardware (ESP32)
             if hasattr(self.mw, 'serial_mgr'):
                 # Use joint_id (e.g. joint_1) instead of display name for code consistency
                 joint_id = self.joints[child_name].get('joint_id', child_name)
                 # Send with current global speed
                 speed = float(getattr(self.mw, 'current_speed', 0))
-                self.mw.serial_mgr.send_command(joint_id, angle_deg, speed=speed)
+                self.mw.serial_mgr.send_command(joint_id, float(joint.current_value), speed=speed)
                 
-            # 6. Show Speed Overlay on 3D Canvas
+            # 5. Show Speed Overlay on 3D Canvas
             if hasattr(self.mw, 'show_speed_overlay'):
                 self.mw.show_speed_overlay()
                 
-            # 7. Push updated transforms to the 3D viewer
+            # 6. Push updated transforms to the 3D viewer
             self.mw.canvas.update_transforms(self.mw.robot)
             
-            # 7b. Update Live Point (LP) coordinates UI
+            # 6b. Update Live Point (LP) coordinates UI
             if hasattr(self.mw, 'update_live_ui'):
                 self.mw.update_live_ui()
 
-            # 8. Propagate to related joints (Bidirectional Coupling)
+            # 7. Synchronize related joints after propagation
             joint_id = self.joints[child_name].get('joint_id', child_name)
             robot = self.mw.robot
             
@@ -1370,33 +1366,27 @@ class JointPanel(QtWidgets.QWidget):
                             l_name = name
                             break
                     if l_name:
-                        self.joints[l_name]['current_angle'] = target_val
+                        self.joints[l_name]['current_angle'] = float(target_joint.current_value)
                         # Sync MatricesPanel if exists
                         if hasattr(self.mw, 'matrices_tab'):
-                            self.mw.matrices_tab.sync_slider(l_name, target_val)
+                            self.mw.matrices_tab.sync_slider(l_name, float(target_joint.current_value))
+                        if hasattr(self.mw, 'experiment_tab'):
+                            self.mw.experiment_tab.sync_slider(l_name, float(target_joint.current_value))
 
-            # A. If Master moved -> Update all Slaves
             if joint_id in robot.joint_relations:
-                for slave_id, ratio in robot.joint_relations[joint_id]:
-                    slave_angle = np.clip(angle_deg * ratio, robot.joints[slave_id].min_limit, robot.joints[slave_id].max_limit)
-                    update_other_joint(slave_id, slave_angle)
-            
-            # B. If Slave moved -> Update Master (and its other slaves)
+                for slave_id, _ in robot.joint_relations[joint_id]:
+                    if slave_id in robot.joints:
+                        update_other_joint(slave_id, robot.joints[slave_id].current_value)
             else:
                 for m_id, slaves in robot.joint_relations.items():
-                    for s_id, ratio in slaves:
-                        if s_id == joint_id and abs(ratio) > 1e-6:
-                            m_angle = np.clip(angle_deg / ratio, robot.joints[m_id].min_limit, robot.joints[m_id].max_limit)
-                            update_other_joint(m_id, m_angle)
-                            # Update siblings
-                            for sib_id, sib_ratio in robot.joint_relations[m_id]:
-                                if sib_id != joint_id:
-                                    sib_angle = np.clip(m_angle * sib_ratio, robot.joints[sib_id].min_limit, robot.joints[sib_id].max_limit)
-                                    update_other_joint(sib_id, sib_angle)
-                            break
+                    if any(s_id == joint_id for s_id, _ in slaves):
+                        update_other_joint(m_id, robot.joints[m_id].current_value)
+                        for sib_id, _ in slaves:
+                            if sib_id in robot.joints:
+                                update_other_joint(sib_id, robot.joints[sib_id].current_value)
+                        break
                 
-            # After updating all related, re-calc kinematics and update canvas once
-            self.mw.robot.update_kinematics()
+            # 8. Refresh the scene once more after UI synchronization.
             self.mw.canvas.update_transforms(self.mw.robot)
 
     def reset_joint_ui(self):
@@ -1482,11 +1472,12 @@ class JointPanel(QtWidgets.QWidget):
         local_pt = (inv_world @ np.append(world_pt, 1))[:3]
         
         # Save to robot model
-        child_link.custom_tcp_offset = local_pt
+        self.mw.robot.set_tcp_transform(self.child_object, position=local_pt, rpy_deg=[0.0, 0.0, 0.0])
         
         # Save to local UI cache for persistence
         if self.child_object in self.joints:
             self.joints[self.child_object]['custom_tcp_offset'] = local_pt.tolist()
+            self.joints[self.child_object]['custom_tcp_rpy_deg'] = [0.0, 0.0, 0.0]
             
         self.mw.log(f"✅ Live Point (TCP) set: {np.round(local_pt, 2)} (Local cm)")
         self.mw.show_toast("TCP Position Saved", "success")

@@ -52,6 +52,26 @@ class CodeDrawer(QtWidgets.QWidget):
         header.addWidget(self.close_btn)
         self.layout.addLayout(header)
         
+        # Language Selector
+        lang_layout = QtWidgets.QHBoxLayout()
+        lang_layout.addWidget(QtWidgets.QLabel("Target Language:"))
+        self.lang_combo = QtWidgets.QComboBox()
+        self.lang_combo.addItems(["Arduino (ESP32)", "Python (Control)", "Matlab (Script)"])
+        self.lang_combo.setStyleSheet("""
+            QComboBox {
+                background-color: #333;
+                color: white;
+                border: 1px solid #555;
+                padding: 4px;
+                border-radius: 4px;
+            }
+        """)
+        self.lang_combo.currentIndexChanged.connect(self.on_lang_changed)
+        lang_layout.addWidget(self.lang_combo)
+        self.layout.addLayout(lang_layout)
+
+        self.codes = {"arduino": "", "python": "", "matlab": ""}
+        
         # Code Editor
         self.code_edit = QtWidgets.QPlainTextEdit()
         self.code_edit.setReadOnly(True)
@@ -122,8 +142,26 @@ class CodeDrawer(QtWidgets.QWidget):
         
         self.hide() # Hidden by default
 
-    def set_code(self, code):
-        self.code_edit.setPlainText(code)
+    def set_codes(self, arduino, python, matlab):
+        self.codes["arduino"] = arduino
+        self.codes["python"] = python
+        self.codes["matlab"] = matlab
+        self.on_lang_changed()
+
+    def on_lang_changed(self):
+        idx = self.lang_combo.currentIndex()
+        if idx == 0: # Arduino
+            self.code_edit.setPlainText(self.codes["arduino"])
+            self.upload_btn.setEnabled(True)
+            self.upload_btn.setToolTip("Compile and Upload to ESP32")
+        elif idx == 1: # Python
+            self.code_edit.setPlainText(self.codes["python"])
+            self.upload_btn.setEnabled(False)
+            self.upload_btn.setToolTip("Python scripts run externally via Serial")
+        elif idx == 2: # Matlab
+            self.code_edit.setPlainText(self.codes["matlab"])
+            self.upload_btn.setEnabled(False)
+            self.upload_btn.setToolTip("Matlab scripts run externally via Serial")
 
     def open_drawer(self):
         """Shows the panel in the main layout."""

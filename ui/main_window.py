@@ -6,6 +6,7 @@ from ui.panels.joint_panel import JointPanel
 from ui.panels.experiment_panel import ExperimentPanel
 from ui.panels.program_panel import ProgramPanel
 from ui.panels.gripper_panel import GripperPanel
+from ui.panels.ik_fk_panel import IKFKPanel
 import os
 import numpy as np
 import random
@@ -36,14 +37,28 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.robot = Robot()
         self.alignment_cache = {} # Cache for storing alignment points: {(parent, child): point}
         self.current_speed = 50   # Global speed setting (0-100%)
+        self.import_preferences = {
+            "last_stl_unit": "mm",
+            "last_up_axis": "preserve",
+        }
+        self.last_project_dir = os.getcwd()
         self.init_ui()
         self.apply_styles()
+        self._setup_live_point_refresh()
+        self._init_navigation_mixin()
         
         # Connect signals
         self.log_signal.connect(self.log)
         
         # Center the window and fix geometry warnings
         self.center_on_screen()
+
+    def _setup_live_point_refresh(self):
+        """Continuously refresh the live point display while the UI is running."""
+        self.live_point_timer = QtCore.QTimer(self)
+        self.live_point_timer.setInterval(50)
+        self.live_point_timer.timeout.connect(self.update_live_ui)
+        self.live_point_timer.start()
 
     def init_ui(self):
         central = QtWidgets.QWidget()
@@ -232,7 +247,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.align_tab = AlignPanel(self)
         self.joint_tab = JointPanel(self)
         self.gripper_tab = GripperPanel(self)
-        self.simulation_tab = self.gripper_tab  # Alias for Torotron compatibility
         
         self.panel_stack.addWidget(self.links_tab)
         self.panel_stack.addWidget(self.align_tab)
@@ -359,7 +373,44 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             }
         """)
         self.focus_btn.clicked.connect(lambda: self.canvas.start_focus_point_picking())
-        
+
+        # --- Live Point Visibility Toggle Button ---
+        self.live_point_btn = QtWidgets.QPushButton(self.canvas)
+        self.live_point_btn.setCheckable(True)
+        self.live_point_btn.setChecked(True)
+        self.live_point_btn.setText("●")
+        self.live_point_btn.setToolTip("Toggle Live Point (red dot) visibility")
+        self.live_point_btn.setFixedSize(38, 38)
+        self.live_point_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.live_point_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                color: #d32f2f;
+                border: 2px solid #e0e0e0;
+                border-radius: 19px;
+                font-size: 18px;
+                font-weight: bold;
+                padding: 0px;
+            }
+            QPushButton:hover {
+                background-color: #f5f5f5;
+                border-color: #d32f2f;
+            }
+            QPushButton:checked {
+                background-color: #ffebee;
+                border-color: #d32f2f;
+                color: #d32f2f;
+            }
+            QPushButton:!checked {
+                color: #bdbdbd;
+                border-color: #e0e0e0;
+            }
+            QPushButton:pressed {
+                background-color: #ffcdd2;
+            }
+        """)
+        self.live_point_btn.clicked.connect(self._toggle_live_point_marker)
+
         # --- Floating Import Object Button (upper-left of canvas) ---
         # REMOVED: Moved to Simulation Panel sidebar
         
@@ -404,6 +455,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             self.iso_btn.move(self.canvas.width() - 160, 24)
             self.home_btn.move(self.canvas.width() - 204, 24)
             self.focus_btn.move(self.canvas.width() - 160, 68)
+            self.live_point_btn.move(self.canvas.width() - 204, 68)
             self.gripper_surface_btn.move(self.canvas.width() - 180, self.canvas.height() - 60)
         
         self.canvas.resizeEvent = patched_resize
@@ -658,6 +710,130 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         if hasattr(self, 'show_toast'):
             self.show_toast("Home Position Reset", "success")
 
+    def _toggle_live_point_marker(self):
+        """Toggle the red live-point dot on the 3D canvas."""
+        visible = self.canvas.toggle_live_point_marker()
+        self.live_point_btn.setChecked(visible)
+        self.show_toast(
+            "Live Point visible" if visible else "Live Point hidden",
+            "info",
+        )
+
+    def _get_preferred_tcp_link(self):
+        links = list(self.robot.links.values())
+        if not links:
+            return None
+
+        def chain_len(link):
+            if link is None:
+                return -1
+            return len(self.robot.get_kinematic_chain(link))
+
+        custom_tcp = getattr(self, "custom_tcp_name", None)
+        if custom_tcp and custom_tcp in self.robot.links:
+            return self.robot.links[custom_tcp]
+
+        tcp_candidates = [link for link in links if getattr(link, "custom_tcp_offset", None) is not None]
+        if tcp_candidates:
+            return max(tcp_candidates, key=chain_len)
+
+        gripper_candidates = [
+            joint.child_link for joint in self.robot.joints.values()
+            if getattr(joint, "is_gripper", False) and joint.child_link is not None
+        ]
+        if gripper_candidates:
+            return max(gripper_candidates, key=chain_len)
+
+        leaf_candidates = [link for link in links if link.parent_joint is not None and not link.child_joints]
+        if leaf_candidates:
+            return max(leaf_candidates, key=chain_len)
+
+        non_base = [link for link in links if not getattr(link, "is_base", False)]
+        if non_base:
+            return max(non_base, key=chain_len)
+
+        return max(links, key=chain_len)
+
+    def _auto_detect_topmost_tcp(self):
+        """
+        Analyses all robot link meshes in their current world positions to find the 
+        absolute highest Z-coordinate. It then sets the Live Point (TCP) to the 
+        centroid of all vertices sharing that maximum height.
+        """
+        import numpy as np
+        
+        max_z = -1e12
+        top_verts_data = [] # List of (world_vertex, link_object)
+        
+        # 1. First pass: Find the global maximum height
+        for link in self.robot.links.values():
+            if link.mesh is None: continue
+            
+            # Get world-transformed vertices
+            try:
+                # link.t_world is updated by update_kinematics
+                mat = np.array(link.t_world, dtype=float)
+                verts = np.array(link.mesh.vertices, dtype=float)
+                
+                # Transform to world space: (N, 3) -> (N, 4) -> mat @ verts.T -> (3, N)
+                ones = np.ones((verts.shape[0], 1))
+                verts_homog = np.hstack([verts, ones])
+                world_verts = (mat @ verts_homog.T).T[:, :3]
+                
+                local_max_z = np.max(world_verts[:, 2])
+                if local_max_z > max_z:
+                    max_z = local_max_z
+            except Exception:
+                continue
+        
+        if max_z < -1e11:
+            return # No geometry found
+            
+        # 2. Second pass: Collect all vertices at the peak (with small epsilon)
+        epsilon = 0.5 # 0.5 internal units (e.g. 0.05mm if units=mm)
+        for link in self.robot.links.values():
+            if link.mesh is None: continue
+            
+            try:
+                mat = np.array(link.t_world, dtype=float)
+                verts = np.array(link.mesh.vertices, dtype=float)
+                ones = np.ones((verts.shape[0], 1))
+                verts_homog = np.hstack([verts, ones])
+                world_verts = (mat @ verts_homog.T).T[:, :3]
+                
+                # Filter vertices at max height
+                mask = world_verts[:, 2] >= (max_z - epsilon)
+                top_v = world_verts[mask]
+                for v in top_v:
+                    top_verts_data.append((v, link))
+            except Exception:
+                continue
+        
+        if not top_verts_data:
+            return
+            
+        # 3. Calculate Centroid of the peak
+        top_pts = np.array([item[0] for item in top_verts_data])
+        centroid_world = np.mean(top_pts, axis=0)
+        
+        # 4. Choose the 'best' link to host the TCP 
+        # (The leaf-most link that contributed to the peak)
+        def chain_len(link):
+            return len(self.robot.get_kinematic_chain(link))
+            
+        unique_links = list(set(item[1] for item in top_verts_data))
+        target_link = max(unique_links, key=chain_len)
+        
+        # 5. Convert world centroid to local link coordinates
+        inv_mat = np.linalg.inv(np.array(target_link.t_world, dtype=float))
+        local_centroid = (inv_mat @ np.append(centroid_world, 1))[:3]
+        
+        # 6. Apply TCP transform
+        self.robot.set_tcp_transform(target_link.name, position=local_centroid)
+        self.custom_tcp_name = target_link.name
+        
+        self.log(f"📍 Auto-TCP Rewired: Live Point set to topmost center of '{target_link.name}' at Z={max_z/getattr(self.canvas, 'grid_units_per_cm', 1.0):.2f} cm.")
+
     def make_robot(self):
         """
         Finalize the current assembly by rebuilding kinematics and syncing UI state.
@@ -674,9 +850,28 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             return False
 
         try:
+            # --- KINEMATIC & STRUCTURAL ANALYSIS ---
             self.robot.update_kinematics()
+            
+            # Dynamically rewire Live Point to the peak of the robot
+            self._auto_detect_topmost_tcp()
+            
+            # Update kinematics again to ensure TCP calculations are fresh
+            self.robot.update_kinematics()
+            
+            joint_count = len(self.robot.joints)
+            self.log("🔍 ANALYSING ROBOT STRUCTURE...")
+            
+            # Diagnostic: Check for disconnected components or invalid axes
+            for name, joint in self.robot.joints.items():
+                if np.linalg.norm(joint.axis) < 0.1:
+                    self.log(f"⚠️ WARNING: Joint '{name}' has a near-zero rotation axis! Accuracy will suffer.")
+                if not joint.parent_link or not joint.child_link:
+                    self.log(f"❌ CRITICAL: Joint '{name}' is missing a parent or child link connection.")
+            
             self.canvas.update_transforms(self.robot)
             self.update_link_colors()
+            self.update_live_ui()
 
             if hasattr(self, "joint_tab"):
                 self.joint_tab.refresh_links()
@@ -689,9 +884,87 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 self.experiment_tab.refresh_sliders()
                 self.experiment_tab.update_display()
 
-            joint_count = len(self.robot.joints)
+            tcp_link = self._get_preferred_tcp_link()
+            workspace = None
+            structure = None
+            if joint_count and tcp_link is not None:
+                self.custom_tcp_name = tcp_link.name
+                # High-density workspace sampling (5000 samples for accuracy)
+                workspace = self.robot.compute_workspace(tcp_link, max_samples=5000)
+                if workspace.get("ok"):
+                    ratio = getattr(self.canvas, "grid_units_per_cm", 1.0) or 1.0
+                    bounds_min_cm = workspace["bounds_min"] / ratio
+                    bounds_max_cm = workspace["bounds_max"] / ratio
+                    radius_cm = workspace["radius_max"] / ratio
+                    directional = workspace.get("directional_reach", {})
+                    structure = self.robot.compute_structure_dynamics(
+                        tcp_link=tcp_link,
+                        workspace_report=workspace,
+                        length_scale=ratio,
+                    )
+                    self.canvas.show_workspace_cloud(workspace["points"])
+                    self.log(
+                        "Workspace computed: "
+                        f"{workspace['sample_count']} sampled configurations for TCP '{workspace['tcp_link']}'."
+                    )
+                    self.log("Workspace model is now available as IK seed memory for faster, smarter solves.")
+                    self.log(
+                        "Workspace bounds (cm): "
+                        f"X[{bounds_min_cm[0]:.2f}, {bounds_max_cm[0]:.2f}] "
+                        f"Y[{bounds_min_cm[1]:.2f}, {bounds_max_cm[1]:.2f}] "
+                        f"Z[{bounds_min_cm[2]:.2f}, {bounds_max_cm[2]:.2f}] "
+                        f"| max reach={radius_cm:.2f} cm"
+                    )
+                    if directional.get("ok"):
+                        cardinal = directional.get("cardinal_reach", {})
+                        self.log(
+                            "Directional max reach (cm): "
+                            f"+X={cardinal.get('+X', 0.0) / ratio:.2f}, "
+                            f"-X={cardinal.get('-X', 0.0) / ratio:.2f}, "
+                            f"+Y={cardinal.get('+Y', 0.0) / ratio:.2f}, "
+                            f"-Y={cardinal.get('-Y', 0.0) / ratio:.2f}, "
+                            f"+Z={cardinal.get('+Z', 0.0) / ratio:.2f}, "
+                            f"-Z={cardinal.get('-Z', 0.0) / ratio:.2f}"
+                        )
+                        best_dir = directional.get("best_direction", {})
+                        worst_dir = directional.get("worst_direction", {})
+                        self.log(
+                            "All-angle directional reach model ready: "
+                            f"max={directional.get('max_directional_reach', 0.0) / ratio:.2f} cm "
+                            f"at az={best_dir.get('azimuth_deg', 0.0):.1f} deg, el={best_dir.get('elevation_deg', 0.0):.1f} deg; "
+                            f"min={directional.get('min_directional_reach', 0.0) / ratio:.2f} cm "
+                            f"at az={worst_dir.get('azimuth_deg', 0.0):.1f} deg, el={worst_dir.get('elevation_deg', 0.0):.1f} deg."
+                        )
+                    if structure and structure.get("ok"):
+                        total_com = structure["total_com_cm"]
+                        balance_offset = structure["base_balance_offset_cm"]
+                        self.log(
+                            "Structure balance: "
+                            f"total mass={structure['total_mass']:.3f} kg, "
+                            f"COM=({total_com[0]:.2f}, {total_com[1]:.2f}, {total_com[2]:.2f}) cm, "
+                            f"base offset=({balance_offset[0]:.2f}, {balance_offset[1]:.2f}, {balance_offset[2]:.2f}) cm."
+                        )
+                        sampled_loads = structure.get("sampled_joint_loads", {})
+                        if sampled_loads:
+                            self.log("Joint load analysis (static gravity torque, N*cm):")
+                            for joint_name, load in sampled_loads.items():
+                                self.log(
+                                    f"  {joint_name}: "
+                                    f"max axis={load['max_abs_axis_torque_ncm']:.2f}, "
+                                    f"mean axis={load['mean_abs_axis_torque_ncm']:.2f}, "
+                                    f"max support={load['max_resultant_torque_ncm']:.2f}, "
+                                    f"max bending={load['max_bending_torque_ncm']:.2f}"
+                                )
+                else:
+                    self.canvas.show_workspace_cloud(None)
+                    self.log(f"Workspace computation skipped: {workspace.get('reason', 'unknown')}.")
+            else:
+                self.canvas.show_workspace_cloud(None)
+
             if joint_count:
                 self.log(f"Robot model ready: {joint_count} joint(s) linked from base '{self.robot.base_link.name}'.")
+                if workspace and workspace.get("ok"):
+                    self.show_toast("Assembly Finalized + Workspace + Dynamics Computed", "success")
             else:
                 self.log(f"Assembly refreshed with base '{self.robot.base_link.name}', but no joints are defined yet.")
             return True
@@ -699,6 +972,137 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             self.log(f"MAKE ROBO ERROR: {exc}")
             self.show_toast("Unable to finalize assembly", "error")
             return False
+
+    def move_live_point_to_xyz(self, x_cm, y_cm, z_cm):
+        """Solve joint angles so the robot live point/TCP reaches the given XYZ target in centimeters."""
+        if not self.robot.joints:
+            self.log("MOVE failed: no joints are defined.")
+            self.show_toast("Create joints first", "warning")
+            return False, {}
+
+        links = list(self.robot.links.values())
+        if not links:
+            self.log("MOVE failed: no links are loaded.")
+            self.show_toast("Import links first", "warning")
+            return False, {}
+
+        tcp_link = self._get_preferred_tcp_link()
+        if tcp_link is None:
+            self.log("MOVE failed: no valid TCP link is available.")
+            self.show_toast("Configure TCP first", "warning")
+            return False, {}
+
+        ratio = getattr(self.canvas, "grid_units_per_cm", 1.0) or 1.0
+        target_world = np.array([x_cm, y_cm, z_cm], dtype=float) * ratio
+        requested_world = target_world.copy()
+        workspace_hint = self.robot.get_workspace_target_hint(target_world, tcp_link)
+        target_snapped = False
+        issues = self.robot.diagnose_ik_setup(tcp_link, requested_world)
+        if issues:
+            self.log("MOVE diagnostic report:")
+            for issue in issues:
+                self.log(f"  Warning: {issue}")
+
+        target_tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+        target_tcp_pose[:3, 3] = requested_world
+
+        old_angles = {name: joint.current_value for name, joint in self.robot.joints.items()}
+        success, info = self.robot.inverse_kinematics_pose(
+            target_tcp_pose,
+            tcp_link,
+            max_iters=350,
+            position_tolerance=max(0.2 * ratio, 0.2),
+            orientation_tolerance=1e6,
+            orientation_weight=0.0,
+            joint_change_weight=0.18,
+        )
+        used_target_world = requested_world.copy()
+        if (
+            not success
+            and workspace_hint.get("ok")
+            and not workspace_hint.get("inside_workspace", True)
+        ):
+            for name, value in old_angles.items():
+                self.robot.joints[name].current_value = value
+            self.robot.update_kinematics()
+
+            fallback_world = np.array(workspace_hint["nearest_point"], dtype=float)
+            fallback_tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+            fallback_tcp_pose[:3, 3] = fallback_world
+            fallback_success, fallback_info = self.robot.inverse_kinematics_pose(
+                fallback_tcp_pose,
+                tcp_link,
+                max_iters=350,
+                position_tolerance=max(0.2 * ratio, 0.2),
+                orientation_tolerance=1e6,
+                orientation_weight=0.0,
+                joint_change_weight=0.18,
+            )
+            if fallback_success:
+                success = fallback_success
+                info = fallback_info
+                used_target_world = fallback_world
+                target_snapped = True
+                snapped_cm = fallback_world / ratio
+                self.log(
+                    "MOVE fallback used nearest sampled reachable point after direct solve failed: "
+                    f"({snapped_cm[0]:.2f}, {snapped_cm[1]:.2f}, {snapped_cm[2]:.2f}) cm."
+                )
+
+        if not success:
+            for name, value in old_angles.items():
+                self.robot.joints[name].current_value = value
+            self.robot.update_kinematics()
+            self.canvas.update_transforms(self.robot)
+            self.update_live_ui()
+            self.log(f"MOVE failed: target ({x_cm:.2f}, {y_cm:.2f}, {z_cm:.2f}) cm is unreachable.")
+            self.show_toast("Target unreachable", "warning")
+            return False, info
+
+        self.robot.update_kinematics()
+        self.canvas.update_transforms(self.robot)
+        self.update_live_ui()
+
+        joint_tab = getattr(self, "joint_tab", None)
+        if joint_tab is not None:
+            for child_name, data in joint_tab.joints.items():
+                joint_id = data.get("joint_id", child_name)
+                if joint_id in self.robot.joints:
+                    data["current_angle"] = float(self.robot.joints[joint_id].current_value)
+            joint_tab.refresh_joints_history()
+
+        if hasattr(self, "experiment_tab"):
+            self.experiment_tab.refresh_sliders()
+            self.experiment_tab.update_display()
+
+        solved_angles = {}
+        for joint in self.robot.get_kinematic_chain(tcp_link):
+            solved_angles[joint.name] = float(joint.current_value)
+
+        self.log(
+            f"MOVE success: live point moved to ({x_cm:.2f}, {y_cm:.2f}, {z_cm:.2f}) cm."
+        )
+        if target_snapped:
+            snapped_cm = used_target_world / ratio
+            requested_cm = requested_world / ratio
+            self.log(
+                "Nearest reachable point used for move: "
+                f"requested=({requested_cm[0]:.2f}, {requested_cm[1]:.2f}, {requested_cm[2]:.2f}) cm, "
+                f"reached=({snapped_cm[0]:.2f}, {snapped_cm[1]:.2f}, {snapped_cm[2]:.2f}) cm."
+            )
+        self.log(
+            "Solved Angles: "
+            + ", ".join(f"{joint_name}={angle:.2f}°" for joint_name, angle in solved_angles.items())
+        )
+        self.show_toast("Nearest reachable point reached" if target_snapped else "Live point target reached", "success")
+        return True, {
+            "tcp_link": tcp_link.name,
+            "joint_angles": solved_angles,
+            "target_snapped": target_snapped,
+            "requested_target_world": requested_world.copy(),
+            "used_target_world": used_target_world.copy(),
+            **info,
+        }
 
 if __name__ == "__main__":
     import sys
