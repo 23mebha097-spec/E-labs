@@ -1,6 +1,6 @@
 import pyvista as pv
 from pyvistaqt import QtInteractor
-from PyQt5 import QtWidgets, QtCore, QtGui
+from PyQt5 import QtWidgets, QtCore, QtGui, sip
 import numpy as np
 import vtkmodules.vtkRenderingCore as vtkRenderingCore
 import vtkmodules.vtkCommonCore as vtkCommonCore
@@ -1598,6 +1598,8 @@ class RobotCanvas(QtWidgets.QWidget):
                 lbl['actor'].SetVisibility(new_vis)
 
     def _on_camera_change(self, *args):
+        if sip.isdeleted(self):
+            return
         import time
         now = time.time()
         if hasattr(self, '_last_cam_update') and (now - getattr(self, '_last_cam_update')) < 0.05:

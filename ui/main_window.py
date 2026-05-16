@@ -42,10 +42,10 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             "last_up_axis": "preserve",
         }
         self.last_project_dir = os.getcwd()
+        self._init_navigation_mixin()
         self.init_ui()
         self.apply_styles()
         self._setup_live_point_refresh()
-        self._init_navigation_mixin()
         
         # Connect signals
         self.log_signal.connect(self.log)

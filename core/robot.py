@@ -445,6 +445,26 @@ class Robot:
         maxs = np.array([joint.max_limit for joint in chain], dtype=float)
         return mins, maxs
 
+    def _joint_motion_stats(self, chain, vector, reference_vector, joint_span=None):
+        vector = np.array(vector, dtype=float)
+        reference_vector = np.array(reference_vector, dtype=float)
+        delta = vector - reference_vector
+        if joint_span is None:
+            mins, maxs = self._joint_bounds(chain)
+            joint_span = np.maximum(maxs - mins, 1.0)
+        else:
+            joint_span = np.maximum(np.array(joint_span, dtype=float), 1.0)
+
+        normalized_delta = delta / joint_span
+        return {
+            "delta": delta,
+            "total_abs": float(np.sum(np.abs(delta))),
+            "max_abs": float(np.max(np.abs(delta))) if len(delta) else 0.0,
+            "l2": float(np.linalg.norm(delta)),
+            "normalized_l2": float(np.linalg.norm(normalized_delta)),
+            "normalized_total_abs": float(np.sum(np.abs(normalized_delta))),
+        }
+
     def set_joint_value(self, joint_name, value, propagate_relations=True):
         if joint_name not in self.joints:
             return False
@@ -959,11 +979,12 @@ class Robot:
         solved = np.clip(np.array(result.x, dtype=float), mins, maxs)
         self._apply_joint_vector(chain, solved)
         err6 = pose_error(target_tcp_pose, self.get_tcp_world_pose(tcp_link))
-        motion_score = float(np.linalg.norm((solved - reference_vector) / joint_span))
+        motion_stats = self._joint_motion_stats(chain, solved, reference_vector, joint_span)
+        motion_score = motion_stats["normalized_l2"]
         score = float(
             np.linalg.norm(err6[:3])
             + (orientation_weight * np.linalg.norm(err6[3:]))
-            + (joint_change_weight * motion_score)
+            + (joint_change_weight * motion_stats["normalized_total_abs"])
         )
         return {
             "vector": solved,
@@ -972,6 +993,8 @@ class Robot:
             "nfev": int(getattr(result, "nfev", 0)),
             "success": bool(getattr(result, "success", False)),
             "motion_score": motion_score,
+            "motion_total_abs": motion_stats["total_abs"],
+            "motion_max_abs": motion_stats["max_abs"],
         }
 
     def _evaluate_chain_fk(self, chain, tcp_link, joint_values_deg=None):
@@ -1096,10 +1119,44 @@ class Robot:
         reference_vector = self._current_joint_vector(chain)
         joint_span = np.maximum(maxs - mins, 1.0)
         best_vector = reference_vector.copy()
-        best_score = np.inf
+        best_rank = (1, np.inf, np.inf, np.inf, np.inf)
         weights = np.array([1.0, 1.0, 1.0, orientation_weight, orientation_weight, orientation_weight], dtype=float)
         best_err6 = None
+        best_motion_stats = self._joint_motion_stats(chain, best_vector, reference_vector, joint_span)
         converged = False
+
+        def candidate_rank(vector, err6):
+            pos_err = float(np.linalg.norm(err6[:3]))
+            rot_err = float(np.linalg.norm(err6[3:]))
+            motion_stats = self._joint_motion_stats(chain, vector, reference_vector, joint_span)
+            orientation_ok = orientation_weight <= 1e-9 or rot_err <= orientation_tolerance
+            reachable = pos_err <= position_tolerance and orientation_ok
+            if reachable:
+                return (
+                    0,
+                    motion_stats["total_abs"],
+                    motion_stats["max_abs"],
+                    pos_err,
+                    rot_err,
+                ), motion_stats
+            return (
+                1,
+                pos_err,
+                rot_err,
+                motion_stats["total_abs"],
+                motion_stats["max_abs"],
+            ), motion_stats
+
+        def consider_candidate(vector, err6):
+            nonlocal best_vector, best_err6, best_rank, best_motion_stats, converged
+            rank, motion_stats = candidate_rank(vector, err6)
+            if rank < best_rank:
+                best_rank = rank
+                best_vector = np.array(vector, dtype=float).copy()
+                best_err6 = np.array(err6, dtype=float).copy()
+                best_motion_stats = motion_stats
+            if rank[0] == 0:
+                converged = True
 
         try:
             seeds = self._merge_seed_lists(
@@ -1131,18 +1188,11 @@ class Robot:
                     current = lsq_result["vector"].copy()
                     pos_err = np.linalg.norm(lsq_result["err6"][:3])
                     rot_err = np.linalg.norm(lsq_result["err6"][3:])
-                    score = lsq_result["score"]
-                    if score < best_score:
-                        best_score = score
-                        best_vector = current.copy()
-                        best_err6 = lsq_result["err6"].copy()
+                    consider_candidate(current, lsq_result["err6"])
                     if pos_err <= position_tolerance and (
                         orientation_weight <= 1e-9 or rot_err <= orientation_tolerance
                     ):
-                        best_vector = current.copy()
-                        best_err6 = lsq_result["err6"].copy()
-                        converged = True
-                        break
+                        continue
 
                 for _ in range(iters_per_seed):
                     self._apply_joint_vector(chain, current)
@@ -1152,17 +1202,17 @@ class Robot:
 
                     pos_err = np.linalg.norm(err6[:3])
                     rot_err = np.linalg.norm(err6[3:])
-                    motion_score = np.linalg.norm((current - reference_vector) / joint_span)
-                    score = pos_err + (orientation_weight * rot_err) + (joint_change_weight * motion_score)
-                    if score < best_score:
-                        best_score = score
-                        best_vector = current.copy()
-                        best_err6 = err6.copy()
+                    motion_stats = self._joint_motion_stats(chain, current, reference_vector, joint_span)
+                    score = (
+                        pos_err
+                        + (orientation_weight * rot_err)
+                        + (joint_change_weight * motion_stats["normalized_total_abs"])
+                    )
+                    consider_candidate(current, err6)
 
-                    if pos_err <= position_tolerance and rot_err <= orientation_tolerance:
-                        best_vector = current.copy()
-                        best_err6 = err6.copy()
-                        converged = True
+                    if pos_err <= position_tolerance and (
+                        orientation_weight <= 1e-9 or rot_err <= orientation_tolerance
+                    ):
                         break
 
                     J = self._compute_pose_jacobian(chain, tcp_link, use_tcp=True)
@@ -1178,11 +1228,11 @@ class Robot:
                     trial = np.clip(current + step, mins, maxs)
                     self._apply_joint_vector(chain, trial)
                     trial_err6 = pose_error(target_tcp_pose, self.get_tcp_world_pose(tcp_link))
-                    trial_motion_score = np.linalg.norm((trial - reference_vector) / joint_span)
+                    trial_motion_stats = self._joint_motion_stats(chain, trial, reference_vector, joint_span)
                     trial_score = (
                         np.linalg.norm(trial_err6[:3])
                         + (orientation_weight * np.linalg.norm(trial_err6[3:]))
-                        + (joint_change_weight * trial_motion_score)
+                        + (joint_change_weight * trial_motion_stats["normalized_total_abs"])
                     )
                     if trial_score < score:
                         current = trial
@@ -1190,9 +1240,6 @@ class Robot:
                     else:
                         current = np.clip(current + (0.2 * step), mins, maxs)
                         lam = min(lam * 1.8, 25.0)
-
-                if converged:
-                    break
 
             self._apply_joint_vector(chain, best_vector)
             flange_pose = self.get_flange_world_pose(tcp_link)
@@ -1214,8 +1261,10 @@ class Robot:
                 "position_error": float(np.linalg.norm(final_err[:3])),
                 "orientation_error": float(np.linalg.norm(final_err[3:])),
                 "fk_validation_pose": tcp_pose.copy(),
-                "best_score": float(best_score),
-                "motion_score": float(np.linalg.norm((best_vector - reference_vector) / joint_span)),
+                "best_score": float(best_rank[1]),
+                "motion_score": float(best_motion_stats["normalized_l2"]),
+                "motion_total_abs_deg": float(best_motion_stats["total_abs"]),
+                "motion_max_abs_deg": float(best_motion_stats["max_abs"]),
                 "joint_motion_deg": {joint.name: float(best_vector[idx] - reference_vector[idx]) for idx, joint in enumerate(chain)},
                 "seed_count": len(seeds),
                 "memory_seed_count": len(self._experience_seed_vectors(target_tcp_pose, chain, tcp_link, top_k=8)),

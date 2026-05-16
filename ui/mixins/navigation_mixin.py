@@ -739,7 +739,7 @@ class NavigationMixin:
             position_tolerance=max(0.1 * ratio, 0.1),
             orientation_tolerance=1e6,
             orientation_weight=0.0,
-            joint_change_weight=0.01,
+            joint_change_weight=0.35,
         )
 
         # Fallback: try nearest point
@@ -760,13 +760,19 @@ class NavigationMixin:
                     position_tolerance=max(0.1 * ratio, 0.1),
                     orientation_tolerance=1e6,
                     orientation_weight=0.0,
-                    joint_change_weight=0.01,
+                    joint_change_weight=0.35,
                 )
 
         # 4. Extract results
         ordered_child_names = [joint.child_link.name for joint in chain]
         ordered_joint_ids = [joint.name for joint in chain]
         new_angles = [joint.current_value for joint in chain]
+        if isinstance(info, dict) and "motion_total_abs_deg" in info:
+            self.log(
+                "Minimal-motion IK selected "
+                f"{info['motion_total_abs_deg']:.2f} deg total joint travel "
+                f"(max single joint {info.get('motion_max_abs_deg', 0.0):.2f} deg)."
+            )
 
         # 5. Revert for animation
         for name, value in old_angles.items():

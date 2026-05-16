@@ -1,0 +1,1959 @@
+--- PAGE 1 ---
+ 
+A Laboratory Manual for 
+ 
+Elements of Robotics & Kinematics 
+(BE04041011) 
+ 
+B.E. Semester 4 
+(Robotics & Automation) 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+Directorate of Technical Education, 
+Gandhinagar, Gujarat 
+ 
+ 
+--- PAGE 2 ---
+L. D. College of Engineering, Ahmedabad 
+Certificate 
+This is to certify that Mr./Ms. ___________________________________ 
+Enrollment No. _______________of B.E. Semester 4 Robotics & Automation 
+of this Institute (GTU Code: 028 ) has satisfactorily completed the Practical / 
+Tutorial work for the subject Elements of Robotics & Kinematics 
+(BE04041011) for the academic year _________ 
+ 
+Place: __________ 
+Date: __________ 
+ 
+ 
+ 
+Name and Sign of Faculty member   
+ 
+ 
+ 
+ 
+ 
+Head of the Department 
+ 
+ 
+ 
+ 
+--- PAGE 3 ---
+ 
+ 
+ 
+Preface 
+ 
+Main motto of any laboratory/practical/field work is for enhancing required skills as well as 
+creating ability amongst students to solve real time problem by developing relevant competencies 
+in psychomotor domain. By keeping in view, GTU has designed competency focused outcome-
+based curriculum for engineering degree programs where sufficient weightage is given to 
+practical work. It shows importance of enhancement of skills amongst the students and it pays 
+attention to utilize every second of time allotted for practical amongst students, instructors and 
+faculty members to achieve relevant outcomes by performing the experiments rather than having 
+merely study type experiments. It is must for effective implementation of competency focused 
+outcome-based curriculum that every practical is keenly designed to serve as a tool to develop 
+and enhance relevant competency required by the various industry among every student. These 
+psychomotor skills are very difficult to develop through traditional chalk and board content 
+delivery method in the classroom. Accordingly, this lab manual is designed to focus on the 
+industry defined relevant outcomes, rather than old practice of conducting practical to prove 
+concept and theory. 
+ 
+By using this lab manual students can go through the relevant theory and procedure in advance 
+before the actual performance which creates an interest and students can have basic idea prior to 
+performance. This in turn enhances pre-determined outcomes amongst students. Each experiment 
+in this manual begins with competency, industry relevant skills, course outcomes as well as 
+practical outcomes (objectives). The students will also achieve safety and necessary precautions 
+to be taken while performing practical. 
+ 
+This manual also provides guidelines to faculty members to facilitate student centric lab activities 
+through each experiment by arranging and managing necessary resources in order that the 
+students follow the procedures with required safety and necessary precautions to achieve the 
+outcomes. It also gives an idea that how students will be assessed by providing rubrics. 
+ 
+This is the fundamental course for the Robotics and Automation program. The aim of this course 
+is to give an overview of basic tools and techniques used for Industrial applications. IT 
+emphasizes the physical understanding of robot kinematics and dynamics, differential motion, 
+design and control of robotic arms. This course supports the students to design and develop the 
+systems, automation and robotics for various industrial applications such as identifying the shape, 
+colour of an object. From this subject, students can make use of  MATLAB / Python or any 
+robotic simulation software to model the different types of robots and they can able to calculate 
+the work volume for different robots. 
+ 
+Utmost care has been taken while preparing this lab manual however always there is chances of 
+improvement. Therefore, we welcome constructive suggestions for improvement and removal of 
+errors if any.  
+ 
+ 
+ 
+ 
+--- PAGE 4 ---
+ 
+ 
+Practical – Course Outcome matrix 
+ 
+Course Outcomes (COs): 
+1. Explain the history, classifications and basic terminologies of robotics and 
+various configuration of robots. 
+2. Analyze forward kinematic model for planar and spatial robot manipulator.  
+3. Evaluate inverse kinematic model for multi-DOF robot manipulators. 
+4. Solve Jacobian matrix for differential motion of robot. 
+Sr. 
+No. 
+Objective(s) of Experiment 
+CO1 
+CO2 CO3 
+CO4 
+ 
+1. Study of Robot terminology, robot components 
+and robot configuration. 
+√ 
+ 
+ 
+ 
+ 
+2. 
+Study of Robot work volume for different robot 
+configurations. 
+√ 
+ 
+ 
+ 
+ 
+3. Study of different robot grippers and 
+design of the grippers. 
+√ 
+ 
+ 
+ 
+ 
+4. Demonstration of Robot movements through robot 
+programming. 
+ 
+√ 
+ 
+ 
+ 
+5. Demonstration of simple robot application e.g. 
+Pick and place and its programming. 
+ 
+√ 
+ 
+ 
+ 
+6. Write the computer codes for robot position 
+analysis. 
+ 
+√ 
+ 
+ 
+ 
+7. Write computer codes for forward kinematics of 
+different robot configurations. 
+ 
+√ 
+ 
+ 
+ 
+8. Write computer codes for inverse kinematics of 
+different robot configurations. 
+ 
+ 
+√ 
+ 
+ 
+9. Write computer codes for Jacobian matrix of 
+different robot configurations. 
+ 
+ 
+ 
+√ 
+ 
+--- PAGE 5 ---
+ 
+ 
+Index 
+(Progressive Assessment Sheet) 
+ 
+Sr. 
+No. 
+ 
+Title of Experiment 
+Page 
+No. 
+Date of 
+performance 
+Date of 
+submission 
+Assessment 
+Marks 
+Sign. of 
+Teacher 
+with 
+date 
+Remarks 
+1 Study of Robot terminology, robot 
+components and robot 
+configuration. 
+ 
+2 Study of Robot work volume for 
+different robot configurations. 
+ 
+3 Study of different robot 
+grippers and design of the 
+grippers. 
+ 
+4 Demonstration of Robot movements 
+through robot programming. 
+ 
+5 Demonstration of simple robot 
+application e.g. Pick and place and 
+its programming. 
+ 
+6 Write the computer codes for robot 
+position analysis. 
+ 
+7 Write computer codes for forward 
+kinematics of different robot 
+configurations. 
+ 
+8 Write computer codes for inverse 
+kinematics of different robot 
+configurations. 
+ 
+9 Write computer codes for Jacobian 
+matrix of different robot 
+configurations. 
+ 
+Total 
+--- PAGE 6 ---
+ 
+ 
+EXPERIMENT 1 
+ 
+AIM: To study robot terminology, major components of a robot, and different robot 
+configurations used in industrial applications. 
+ 
+1. Theory 
+Definition:  
+According to International Organization for Standardization (ISO):  
+An 
+automatically 
+controlled, 
+reprogrammable, 
+multipurpose 
+manipulator 
+programmable in three or more axes, which can be either fixed in place or mobile for 
+use in industrial automation applications. 
+According to Robot Institute of America (RIA)  
+ It is a reprogrammable, multi-functional manipulator designed to move materials, 
+parts, tools or specialized devices through variable programmed motions for the 
+performance of a variety of tasks`.  
+ 
+ 
+1.1 Robot Terminology  
+1. Robot 
+A robot is a reprogrammable, multifunctional manipulator designed to move materials, 
+parts, tools, or devices through programmed motions for the performance of a variety 
+of tasks. 
+2. Robotics 
+Robotics is the branch of engineering that deals with the design, construction, control, 
+and application of robots. 
+3. Manipulator 
+The manipulator is the mechanical arm of the robot consisting of links and joints used 
+to position the end effector. 
+4. End Effector 
+An end effector is the device attached to the wrist of the robot to perform a specific 
+task such as gripping or welding. 
+5. Degrees of Freedom (DOF) 
+Degrees of freedom refer to the number of independent motions a robot can perform. 
+6. Workspace 
+Workspace is the total volume of space that can be reached by the robot end effector. 
+7. Accuracy 
+--- PAGE 7 ---
+ 
+ 
+Accuracy is the ability of the robot to reach a specified target position. 
+8. Repeatability 
+Repeatability is the ability of the robot to return repeatedly to the same position. 
+ 
+1.2. Robot Components 
+A robot system consists of the following main components: 
+1. Manipulator – Provides motion and reach using links and joints. 
+2. End Effector – Performs the required task on the workpiece. 
+3. Actuators – Provide motion to joints (electric, hydraulic, pneumatic). 
+4. Sensors – Provide feedback such as position, force, and proximity. 
+5. Controller – Controls robot motion and executes programs. 
+6. Power Supply – Supplies required power to the robot system. 
+ 
+Figure: Components of Robot 
+ 
+ 
+Figure: Comparison of Parts of Robot and Human Being. 
+    Figure. Comparison of Human and Robot Manipulator 
+--- PAGE 8 ---
+ 
+ 
+ 
+1.3. Robot Configuration 
+Robot configuration refers to the geometric arrangement of joints and links of a 
+robot. 
+1.3.1. Cartesian Coordinate Robots (PPP or SSS) 
+• 
+Linear movement along three different axes 
+• 
+Have either sliding or prismatic joints, that is, SSS or PPP 
+• 
+Rigid and accurate 
+• 
+Suitable for pick and place type of operations, assembly operations, arc 
+welding and handling machine tools 
+• 
+Examples: IBM’s RS-1, Sigma robot 
+Applications: These types of robots are used for: 
+• 
+Pick and place work 
+• 
+Application of sealant 
+• 
+Assembly operations Handling machine tools 
+• 
+Arc welding 
+ 
+ 
+ 
+1.3.2. Cylindrical Coordinate Robots (TPP or TSS) 
+• 
+Two linear and one rotary movement 
+• 
+Represented as TPP, TSS 
+• 
+High rigidity of the manipulator 
+• 
+Used to handle parts/ objects in manufacturing, spot welding, handling at die-
+--- PAGE 9 ---
+ 
+ 
+casting machines 
+• 
+Cannot reach the objects lying on the floor 
+• 
+Poor dynamic performance 
+• 
+Examples: Versatran 600 
+                       
+ 
+Applications:  
+• Assembly operations 
+• Handling machine tools 
+• Spot-welding 
+• Handling die-casting machines 
+1.3.3. Spherical Coordinate or Polar Coordinate Robots 
+• 
+One linear and two rotary movement 
+• 
+Represented as TRP, TRS 
+• 
+Suitable for handling parts/objects in manufacturing 
+• 
+Can pick up objects lying on the floor 
+• 
+Poor dynamic performance 
+• 
+Examples: Unimate 2000B 
+ 
+5. 11Robot 
+• Multiple revolute joints 
+• High flexibility 
+ 
+--- PAGE 10 ---
+ 
+ 
+ 
+Applications: 
+• Handlings at die casting or fettling machines Handling machine tools 
+• Arc/spot welding 
+1.3.4. Revolute Coordinate or Articulated Coordinate Robots 
+• Rotary movement about three independent axes 
+• Represented as TRR 
+• Suitable for handling parts/components in manufacturing system 
+• Rigidity and accuracy may not be good enough 
+• Examples: T3, PUMA 
+ 
+Applications:  
+• Assembly operations 
+• Die casting 
+• Fettling machines 
+• Gas welding 
+• Arc welding 
+• Spray-painting 
+1.3.5. SCARA Robot: Selective Compliance Assembly Robot Arm 
+• One style of robot that has recently become quite popular is a combination of the 
+articulated arm and the cylindrical robot.  
+• This robot has more than three axes and is called a SCARA Robot.  
+--- PAGE 11 ---
+ 
+ 
+• It is used widely in electronic assembly.  
+• The rotary axes are mounted vertically rather than horizontally. 
+ 
+ 
+Quiz: 
+Q1. Classify the robots according to Japan Industrial Robot Association (JIRA) 
+Q2. Explain with neat sketch different types of joints used in robots. Draw the symbolic 
+representation of joints. What is significance of joints in the robots? 
+Q3. Explain the classification of robot (other than JIRA). 
+ 
+ 
+ 
+ 
+ 
+ 
+--- PAGE 12 ---
+ 
+ 
+ 
+EXPERIMENT 2 
+ 
+Aim : Study of Robot work volume for different robot configurations.  
+1. Theory:  
+The work volume (or workspace) of a robot is the 3D region in space that the robot’s end-
+effector can reach, considering: 
+• Joint limits 
+• Link lengths 
+• Mechanical constraints 
+• Sometimes orientation constraints (position-only vs position + orientation) 
+Two common notions: 
+• Reachable workspace: all points the end-effector can reach. 
+• Dexterous workspace: points where the end-effector can reach with all required 
+orientations. 
+ 
+2. Major Robot Configurations and Their Work Volumes: 
+2.1. Workspace of Cartesian Coordinate Robot: 
+Configuration: Three orthogonal linear joints (X, Y, Z) 
+ 
+ 
+Characteristics: 
+--- PAGE 13 ---
+ 
+ 
+• Workspace = product of axis travels 
+• Very simple and fully usable volume 
+• No singularities within the volume 
+Advantages:  
+• 100% usable workspace 
+• High accuracy and stiffness 
+• Simple control and programming 
+Disadvantages:  
+• Large physical footprint 
+• Limited flexibility 
+ Applications: 
+• CNC machines 
+• Pick-and-place gantries 
+• 3D printers 
+ 
+2.2. Workspace of Cylindrical Coordinate Robot 
+Configuration: One rotary joint + two linear joints 
+ 
+ 
+Characteristics: 
+• Rotation creates circular symmetry 
+• Dead zone near the center column 
+Advantages:  
+--- PAGE 14 ---
+ 
+ 
+▪ 
+Good reach around a central axis 
+▪ 
+Compact compared to Cartesian 
+Disadvantages: 
+• Limited dexterity 
+• Central void region 
+Applications: 
+• Machine loading/unloading 
+• Assembly tasks 
+2.3. Workspace of Spherical Coordinate Robot 
+Configuration: Two rotary joints + one linear joint 
+ 
+Characteristics: 
+• Radial reach with angular motion 
+• Workspace limited by joint angle ranges 
+Advantages:  
+• Wide angular coverage 
+• Moderate footprint 
+Disadvantages 
+• Complex kinematics 
+• Lower accuracy near singularities 
+Applications: 
+• Welding 
+• Die casting 
+--- PAGE 15 ---
+ 
+ 
+• Spray painting 
+2.4. Workspace of Revolute or Articulated Coordinate Robot 
+Configuration: 5–7 rotary joints (human-arm-like) 
+ 
+ 
+ 
+Characteristics: 
+• Highly dependent on joint limits 
+• Internal voids and complex boundaries 
+• Dexterous workspace is much smaller than reachable workspace 
+Advantages:  
+• Extremely flexible 
+• High orientation capability 
+• Small footprint 
+Disadvantages:  
+• Complex control 
+• Singularities 
+• Not all workspace is usable 
+Applications: 
+• Welding 
+• Painting 
+• Assembly 
+• Medical and service robots 
+--- PAGE 16 ---
+ 
+ 
+ 
+2.5. Workspace of SCARA Robot 
+Configuration: Two coplanar rotary joints + vertical linear joint 
+ 
+ 
+ 
+Characteristics: 
+• Large horizontal reach 
+• Limited vertical motion 
+• Excellent repeatability in X–Y plane 
+Advantages: 
+• Very fast 
+• Ideal for planar assembly 
+Disadvantages: 
+• Poor orientation capability 
+• Small dexterous workspace 
+Applications: 
+• Electronics assembly 
+• Pick-and-place 
+• Packaging 
+ 
+Comparative Summary 
+--- PAGE 17 ---
+ 
+ 
+Robot Type 
+Workspace Shape 
+Volume Size 
+Dexterity 
+Accuracy 
+Cartesian 
+Cuboid 
+Large 
+Low 
+Very High 
+Cylindrical 
+Cylinder 
+Medium 
+Low 
+High 
+Spherical 
+Spherical shell 
+Medium 
+Medium 
+Medium 
+SCARA 
+Annular cylinder 
+Medium 
+Low 
+Very High 
+Articulated 
+Irregular sphere 
+Large 
+Very High 
+High 
+Parallel 
+Dome / Pyramid 
+Small 
+Medium 
+Very High 
+ 
+Quiz:  
+A. Very Short Answer Questions  
+1. Define robot work volume (workspace). 
+2. What is the difference between reachable workspace and dexterous workspace? 
+3. What type of joint produces linear motion in a robot? 
+4. Which robot configuration resembles the human arm? 
+5. Why do Cartesian robots have fully usable work volumes? 
+6. What is meant by a “dead zone” in robot workspace? 
+B. Short Answer Questions 
+1. Describe the work volume of a Cartesian robot and list two applications. 
+2. Compare the work volumes of SCARA and cylindrical robots. 
+3. Discuss the effect of joint limits on robot workspace. 
+4. Why are parallel robots limited to small work volumes? 
+5. Explain how link length affects robot workspace. 
+C. Long Answer / Descriptive Questions  
+1. Discuss the factors affecting the work volume of a robot. 
+ 
+ 
+ 
+ 
+ 
+ 
+ 
+--- PAGE 18 ---
+ 
+ 
+EXPERIMENT 3 
+ 
+Aim: Study of different robot grippers and design of the grippers. 
+ 
+1. Theory:  
+In robotics, an end effector is a device or tool connected to the end of a robot arm. Basically, 
+it is a tool to grip, hold, and transport objects and position them in a desired location. End 
+effectors are the devices through which a robot interacts with the world around it, grasping and 
+manipulating parts, inspecting surfaces, and working on them. As such, end effectors are 
+among the most important elements of a robotic application and an integral component of the 
+overall tooling, fixturing, and sensing strategy. An end effector attached to the robotic arm is 
+shown in Figure.  
+ 
+2. Classification of End Effectors: 
+An end effector covers a wide range of different tools and devices that can be classified into 
+two main categories:  
+A) Grippers  
+B) Tools for process application 
+ 
+2.1. Grippers: 
+Grippers are end effectors that actually grip a part for transfer operations in the work 
+envelope of the robot. A gripper is a component of the robot used to manipulate an object 
+loose from the robot itself. This can be a component it needs to pick up, or the waste it is 
+programmed to find and dispose of. Grippers include mechanical hands and also anything 
+like hooks, magnets, and suction devices, which can be used for holding or gripping. 
+A robot gripper is shown in Figure.  
+--- PAGE 19 ---
+ 
+ 
+ 
+Selection of Gripper: 
+The selection of gripper is usually made by examining the geometry of the part, its 
+orientation, the space available, and the manufacturing treatment to be performed. 
+Selection of the gripper is based upon a number of factors that may need consideration:  
+a) Source of power  
+b) Gripping force  
+c) Gripping style  
+d) Weight  
+e) Environmental capabilities  
+f) Sensor capabilities  
+g) Number of jaws  
+h) Other factor 
+ 
+a) Source of Power: According to source of power, grippers are classified as pneumatic, 
+hydraulic, and electrical 
+b) Gripping force: When considering the gripping force required, a number of factors must 
+be considered. Not only must the mass of the object to be gripped be taken into account 
+but also the accelerations imposed on it by the robot must be taken into account. The 
+coefficient of friction between the gripper and the object may also be an important factor. 
+c) Gripping Style: The configurations of grippers include parallel and angular styles, and 
+those with two or three jaws. Parallel jaws move in a motion parallel in relation to the 
+gripper body, while angular jaws open and close around a central pivot point, moving in 
+an arcing motion. Determining which gripper to use is dependent on the specific needs of 
+an application. Angular and Parallel grippers are as shown in figure  
+--- PAGE 20 ---
+ 
+ 
+ 
+ 
+Figure: Angular and Parallel Grippers 
+A gripper can also be external or internal. The external gripper is used to grasp the 
+exterior surface of objects with closed fingers, whereas the internal gripper grips the 
+internal surface of objects with open fingers. External and internal grippers are shown in 
+Figure 15.5. 
+   
+ 
+Figure: Internal Gripper 
+ 
+ 
+ 
+External Gripper 
+ 
+d) Weight: Industrial robots have fixed lifting capabilities and the combined weight of the 
+gripper and gripped component may be important. Even when this weight is within the 
+capability of the robot, it may cause an unacceptable increase in the cycle time of the 
+operation. The distance between the robot flange and the center of mass may also be 
+important and this should be kept to a minimum 
+e) Environmental Capabilities: End effectors are often required to work in hostile 
+environments. High temperatures, dust, or the presence of chemicals will require special 
+materials or designs to be used. 
+f) Sensor Capabilities: For certain applications, some degree of sensory feedback from the 
+--- PAGE 21 ---
+ 
+ 
+gripper is necessary. This may be measurement of insertion or gripping forces or may 
+simply be a proximity sensor to say if anything is between the jaws of the gripper. Some 
+standard grippers are provided with feedback to show the separation of the jaws but most 
+grippers have no feedback. 
+g) Number of Jaws (Two or Three Jaw Gripper): In two jaw units, which come in both 
+parallel and angular styles, the grasper affords two mounting spots for the fingers to hold 
+the part. The jaws move in a simultaneous motion, opening and closing toward the 
+central axis of the gripper body. Three jaws furnish more contact with the part to be 
+clasped and are more accurate in centering than are two jaws. 
+h) Others: Other factors to be considered include the speed of the gripper jaws and the 
+range of sizes of the components they can grip. The amount of maintenance required is 
+also important though most modern mechanisms require little or no maintenance. For 
+some situations, the behavior of the gripper on power failure may be critical. Some but 
+not all use either springs to apply the gripping force or non-return valves to ensure that 
+pressure is maintained 
+ 
+2.2. Gripping Mechanisms: 
+A gripper is specifically end of arm tooling that uses a mechanical mechanism and 
+actuator to grasp a part with gripping surfaces. Fingers are designed to: Physically mate 
+with the part for a good grip. Apply enough force to the part to prevent slipping.  
+Typical mechanisms are  
+• Linkage actuation  
+• Gear and rack  
+• Cam  
+• Screw  
+• Rope and pulley  
+• Miscellaneous, e.g., bladder, diaphragm 
+ 
+2.3. Classification of Grippers: 
+ 
+1. 
+Single gripper and double gripper: 
+ 
+Single gripper: Only one gripping device is mounted on the wrist 
+Double gripper: Two independent gripping devices are attached to the wrist 
+Example: Two separate grippers mounted on the wrist for loading and unloading 
+applications. 
+--- PAGE 22 ---
+ 
+ 
+     
+ 
+ 
+2.  Internal gripper vs. External gripper 
+3. Soft gripper vs. Hard gripper    
+Hard gripper: Point contact between the finger and object 
+ 
+Soft gripper: Area (surface) contact between the finger and object 
+4. Active and Passive gripper:  
+Active Gripper with sensor(s) + requires external Power Supply 
+Passive gripper: Gripper without sensor(s) + No need of external power supply 
+  Ex: Remote Center Compliance 
+5. Mechanical Grippers: 
+The mechanical grippers use mechanical fingers actuated by a mechanism to grasp an 
+object. A basic robot hand will have only two or three fingers. A mechanical hand that 
+wraps around an object will rely on friction in order to secure the object it is holding. 
+Friction between the gripper and the object will depend on two things, first is the type of 
+surface whether it be metal on metal, rubber on metal, smooth surfaces, or rough surfaces 
+and the second is the force which is pressing the surfaces together. 
+6. Vaccume or Suction grippers: 
+Suction grippers are of two types:  
+a. Devices operated by a vacuum: The vacuum may be provided by a vacuum pump or by 
+compressed air  
+b.  Devices with a flexible suction cup: This cup presses on the workpiece. Compressed air 
+is blown into the suction cup to release the workpiece. The advantage of the suction cup is 
+that if there is a power failure it will still work, as the workpiece will not fall down. The 
+disadvantage of the suction cup is that they only work on clean, smooth surfaces. The 
+suction cups are made of rubber-like materials (silicone, neoprene). 
+--- PAGE 23 ---
+ 
+ 
+7. Magnetic Grippers:  
+Magnetic grippers are considered when the part to be handled is of ferrous content. The 
+principle is the same as of vacuum grippers except that magnetic grippers replace the cups. 
+This system has the advantage that it can quickly handle metal parts with holes. For maximum 
+effect, the magnet needs to have complete contact with the surface of the metal to be gripped. 
+ 
+Quiz:  
+1) 
+Explain the working principle of an end effector with the help of a sketch and give its 
+important applications.  
+2) 
+How are the robot end effectors classified?  
+3) 
+List the different end effectors used on robots.  
+4) 
+What are the various types of grippers used in robots?  
+ 
+ 
+ 
+--- PAGE 24 ---
+ 
+ 
+EXPERIMENT 4 
+Aim : Demonstration of Robot movements through robot programming. 
+ 
+1. Apparatus / Software Required 
+• Educational Robot / Industrial Robot / Mobile Robot (as available) 
+• Robot Controller 
+• Programming Interface (Arduino IDE / RoboDK / ROS / Teach Pendant / Python, etc.) 
+• Power Supply 
+• Connecting Cables 
+• Computer System 
+ 
+2. Theory 
+A robot is an electromechanical device capable of performing programmed movements with 
+accuracy and repeatability. Robot movements are controlled by programming commands that 
+specify direction, speed, position, and timing. 
+Basic robot motions include: 
+• Linear motion 
+• Rotational motion 
+• Forward and backward movement 
+• Turning left and right 
+• Pick-and-place (for articulated robots) 
+By using robot programming, we can control actuators such as motors and servos to perform 
+these movements precisely. 
+ 
+3. Procedure 
+1. 
+Connect the robot to the controller and power supply. 
+2. 
+Interface the robot controller with the computer system. 
+3. 
+Open the robot programming software. 
+4. 
+Initialize the robot and set the home position. 
+5. 
+Write a program to perform basic movements such as: 
+o 
+Forward movement 
+o 
+Backward movement 
+o 
+Left turn 
+o 
+Right turn 
+o 
+Stop 
+6. 
+Compile and upload the program to the robot controller. 
+7. 
+Execute the program and observe the robot movements. 
+8. 
+Verify whether the robot follows the programmed path accurately. 
+9. 
+Stop the robot after completing the operation. 
+ 
+ 
+ 
+--- PAGE 25 ---
+ 
+ 
+ 
+4. Observation 
+The robot performed all programmed movements such as forward, backward, left, and right 
+turns accurately according to the given instructions. 
+ 
+5. Result 
+Thus, the demonstration of robot movements through robot programming was successfully 
+performed. 
+ 
+6. Precautions 
+Ensure proper power supply connections. 
+Keep hands away from moving robot parts. 
+Verify the program before execution. 
+Use emergency stop if abnormal behavior occurs. 
+ 
+7. Applications 
+• Industrial automation 
+• Material handling 
+• Assembly lines 
+• Medical and service robots 
+• Educational robotics 
+ 
+ 
+Quiz: 
+1) Name some programming languages for robot programming.  
+2) Explain the use of teach pendant for robot programming.  
+3) Compare online and offline programming of robot.  
+4) Discuss the lead through programming technique used in robot programming.  
+5) Explain the following Manual programming  
+ 
+ 
+--- PAGE 26 ---
+ 
+ 
+ 
+EXPERIMENT 5 
+Aim : Demonstration of simple robot application e.g. Pick and place and its programming. 
+ 
+1. Apparatus / Software Required 
+• Pick and Place Robot / Robotic Arm 
+• Robot Controller 
+• End Effector (Gripper) 
+• Power Supply 
+• Programming Interface (Arduino IDE / RoboDK / Teach Pendant / Python, etc.) 
+• Computer System 
+• Object to be picked and placed 
+ 
+2. Theory 
+Pick and place is a basic and widely used robot application in industrial automation. In this 
+operation, the robot picks an object from a specified position and places it at another location. 
+The movement is achieved by controlling joints, motors, and the gripper through a programmed 
+sequence. 
+The robot follows predefined positions such as: 
+• Home position 
+• Pick position 
+• Place position 
+Robot programming ensures accuracy, repeatability, and safe operation during the pick-and-
+place task. 
+ 
+3. Procedure 
+1. 
+Connect the robot to the controller and power supply. 
+2. 
+Initialize the robot and set the home position. 
+3. 
+Define the pick position and place position. 
+4. 
+Write a robot program to control: 
+o 
+Arm movement 
+o 
+Gripper open and close 
+5. 
+Compile and upload the program to the robot controller. 
+6. 
+Execute the program. 
+7. 
+Observe the robot picking the object from the pick position. 
+8. 
+Observe the robot placing the object at the place position. 
+9. 
+Return the robot to the home position. 
+10. 
+Stop the robot after completing the operation. 
+ 
+4. Observation 
+ 
+The robot successfully picked the object from the pick position and placed it accurately at the 
+--- PAGE 27 ---
+ 
+ 
+specified place position. 
+ 
+5. Result 
+ 
+Thus, the demonstration of a simple robot application (pick and place) using robot 
+programming was successfully carried out. 
+ 
+6. Precautions 
+• Ensure correct alignment of pick and place positions. 
+• Avoid overloading the gripper. 
+• Keep hands clear of the robot during operation. 
+• Verify the program before execution. 
+ 
+7. Applications 
+• Industrial assembly lines 
+• Material handling 
+• Packaging systems 
+• Sorting operations 
+ 
+Quiz:  
+1) Write a program for pick and place of an object. 
+2) Write a program for palatizing of objects. 
+ 
+ 
+ 
+ 
+--- PAGE 28 ---
+ 
+ 
+EXPERIMENT 6 
+Aim: Write the computer codes for robot position analysis. 
+ 
+1. Objectives 
+To understand the concept of robot position analysis 
+To study forward kinematics of a 3-DOF robot 
+To compute and visualize the end-effector position using programming 
+ 
+2. Apparatus / Software Required 
+Computer System 
+Programming Language: Python / MATLAB / C 
+Mathematical library (for trigonometric functions) 
+Given robot parameters (link lengths and joint angles) 
+ 
+3. Theory 
+Robot position analysis determines the position of the end-effector with respect to a fixed reference 
+frame. 
+In a 3-DOF planar robotic arm, the robot consists of three rigid links connected by three revolute 
+joints. 
+The end-effector position (𝒙, 𝒚)is calculated using forward kinematics: 
+𝒙= 𝒍𝟏𝐜𝐨𝐬⁡ 𝜽𝟏+ 𝒍𝟐𝐜𝐨𝐬⁡(𝜽𝟏+ 𝜽𝟐) + 𝒍𝟑𝐜𝐨𝐬⁡(𝜽𝟏+ 𝜽𝟐+ 𝜽𝟑) 
+𝒚= 𝒍𝟏𝐬𝐢𝐧⁡ 𝜽𝟏+ 𝒍𝟐𝐬𝐢𝐧⁡(𝜽𝟏+ 𝜽𝟐) + 𝒍𝟑𝐬𝐢𝐧⁡(𝜽𝟏+ 𝜽𝟐+ 𝜽𝟑) 
+Where: 
+𝒍𝟏, 𝒍𝟐, 𝒍𝟑= link lengths 
+𝜽𝟏, 𝜽𝟐, 𝜽𝟑= joint angles 
+3.1. Representation of a Point in Space 
+In robotics, a point is represented with respect to a reference frame. 
+Fixed Reference Frame 
+Let {O} be a fixed reference frame with orthonormal axes: 
+𝑖̂, 𝑗̂, 𝑘̂ 
+Position Vector of a Point 𝑃 
+The position of point 𝑃relative to frame {O} is: 
+𝐫𝑷= 𝒙 𝒊̂ + 𝒚 𝒋̂ + 𝒛 𝒌̂ 
+or in column vector form: 
+𝐫𝑷= [
+𝒙
+𝒚
+𝒛
+] 
+A point has no orientation, only position. 
+A point is used to define: 
+• 
+Tool centre point (TCP) 
+• 
+Joint locations 
+• 
+Feature positions 
+ 
+3.2 Representation of a Vector in Space 
+--- PAGE 29 ---
+ 
+ 
+A vector is independent of location and represents direction and magnitude. 
+Vector Representation 
+Let vector v be: 
+𝐯= 𝒗𝒙𝒊̂ + 𝒗𝒚𝒋̂ + 𝒗𝒛𝒌̂ 
+Matrix form: 
+𝐯= [
+𝒗𝒙
+𝒗𝒚
+𝒗𝒛
+] 
+In robotics: 
+• 
+Velocity,  Force,  Moment,  Angular velocity are all vectors. 
+ 
+3.3. Representation of a Frame in Space 
+A coordinate frame is defined by: 
+1. 
+An origin 
+2. 
+Three mutually orthogonal unit vectors 
+Frame {A} with respect to {O} 
+Let frame {A} have unit vectors:  
+𝒙̂𝑨, 𝒚̂𝑨, 𝒛̂𝑨 
+ 
+Then frame {A} is represented by: 
+• 
+Orientation → rotation matrix 
+• 
+Position → translation vector 
+3.4. Representation of a Frame at the Origin of a Fixed Frame 
+If frame {A} is located at the origin of {O}, but rotated: 
+Rotation Matrix 
+𝑶𝑹𝑨= [
+𝒙̂𝑨⋅𝒊̂
+𝒚̂𝑨⋅𝒊̂
+𝒛̂𝑨⋅𝒊̂
+𝒙̂𝑨⋅𝒋̂
+𝒚̂𝑨⋅𝒋̂
+𝒛̂𝑨⋅𝒋̂
+𝒙̂𝑨⋅𝒌̂
+𝒚̂𝑨⋅𝒌̂
+𝒛̂𝑨⋅𝒌̂
+] 
+ Important properties: 
+• 
+Orthogonal matrix 
+• 
+𝑹𝑻𝑹= 𝑰 
+• 
+𝐝𝐞𝐭⁡(𝑹) = +𝟏 
+3.5. Representation of a Rigid Body 
+A rigid body is completely described by attaching a body-fixed frame. 
+Thus, rigid body representation requires: 
+1. 
+Position of origin 
+2. 
+Orientation of axes 
+Let body frame be {B}, fixed frame be {O}. 
+Translation Vector 
+𝑶𝐩𝑩= [
+𝒑𝒙
+𝒑𝒚
+𝒑𝒛
+] 
+Orientation Matrix 
+𝑶𝑹𝑩 
+ 
+3.6. Homogeneous Transformation Matrix (Core of Ghosal) 
+To combine rotation and translation, we use homogeneous coordinates. 
+Homogeneous Transformation 
+𝑶𝑻𝑩= [
+𝑶𝑹𝑩
+𝑶𝐩𝑩
+𝟎 𝟎 𝟎
+𝟏
+] 
+ 
+This matrix: 
+--- PAGE 30 ---
+ 
+ 
+• 
+Maps coordinates from frame {B} to {O} 
+• 
+Encodes full pose of a rigid body 
+ 
+3.7. Representation of Transformation of a Point 
+Let a point 𝑃be expressed in frame {B}: 
+𝑩𝐩𝑷= [
+𝒙𝑩
+𝒚𝑩
+𝒛𝑩
+𝟏
+] 
+ 
+Then its coordinates in frame {O}: 
+𝑶𝐩𝑷=
+𝑶𝑻𝑩 
+𝑩𝐩𝑷 
+ 
+ This is central to forward kinematics. 
+ 
+3.8. Pure Translation 
+If frame {B} is translated but not rotated: 
+𝑹= 𝑰 
+𝑻= [
+𝟏
+𝟎
+𝟎
+𝒑𝒙
+𝟎
+𝟏
+𝟎
+𝒑𝒚
+𝟎
+𝟎
+𝟏
+𝒑𝒛
+𝟎
+𝟎
+𝟎
+𝟏
+] 
+ 
+Orientation unchanged, origin shifted. 
+ 
+3.9. Pure Rotation 
+If frame {B} is rotated but not translated: 
+𝐩= 𝟎 
+𝑻= [𝑹
+𝟎
+𝟎
+𝟏] 
+3.10. Elementary Rotation Matrices  
+Rotation about X-axis 
+𝑅𝑥(𝜃) = [
+1
+0
+0
+0
+cos 𝜃
+−sin⁡ 𝜃
+0
+sin 𝜃
+cos 𝜃
+] 
+ 
+Rotation about Y-axis 
+𝑅𝑦(𝜃) = [
+cos𝜃
+0
+sin𝜃
+0
+1
+0
+−sin⁡ 𝜃
+0
+cos𝜃
+] 
+ 
+Rotation about Z-axis 
+𝑅𝑧(𝜃) = [
+cos 𝜃
+−sin⁡𝜃
+0
+sin𝜃
+cos𝜃
+0
+0
+0
+1
+] 
+ 
+4. Procedure 
+• Start the programming environment. 
+• Define the link lengths of the 3-DOF robotic arm. 
+• Read joint angles as input from the user. 
+• Convert joint angles from degrees to radians. 
+• Apply forward kinematics equations. 
+• Compute joint and end-effector positions. 
+• Display the end-effector coordinates. 
+• Plot the robot configuration graphically. 
+--- PAGE 31 ---
+ 
+ 
+• Verify results for different joint values. 
+ 
+5. Program (Python Code) 
+import math 
+import matplotlib.pyplot as plt 
+ 
+# Link lengths 
+l1 = 8 
+l2 = 6 
+l3 = 4 
+ 
+# Joint angles in degrees 
+theta1 = float(input("Enter theta1 (degrees): ")) 
+theta2 = float(input("Enter theta2 (degrees): ")) 
+theta3 = float(input("Enter theta3 (degrees): ")) 
+ 
+# Convert degrees to radians 
+t1 = math.radians(theta1) 
+t2 = math.radians(theta2) 
+t3 = math.radians(theta3) 
+ 
+# Joint positions 
+x0, y0 = 0, 0 
+x1 = l1 * math.cos(t1) 
+y1 = l1 * math.sin(t1) 
+ 
+x2 = x1 + l2 * math.cos(t1 + t2) 
+y2 = y1 + l2 * math.sin(t1 + t2) 
+ 
+x3 = x2 + l3 * math.cos(t1 + t2 + t3) 
+y3 = y2 + l3 * math.sin(t1 + t2 + t3) 
+ 
+# End-effector position 
+print("End Effector Position:") 
+print("X =", x3) 
+print("Y =", y3) 
+ 
+--- PAGE 32 ---
+ 
+ 
+# Plotting 
+plt.figure() 
+plt.plot([x0, x1, x2, x3], [y0, y1, y2, y3], marker='o') 
+plt.xlabel("X Position") 
+plt.ylabel("Y Position") 
+plt.title("Position Analysis of 3-DOF Robotic Arm") 
+plt.grid(True) 
+plt.show() 
+ 
+6. Observation 
+The robot arm configuration changes with variation in joint angles. 
+The end-effector position varies according to the forward kinematics equations. 
+The plotted graph accurately represents the robot structure. 
+ 
+7. Result 
+Thus, the computer code for position analysis of a 3-DOF robotic arm was successfully written, 
+executed, and the end-effector position was obtained and plotted graphically. 
+ 
+8. Precautions 
+• Ensure correct unit conversion from degrees to radians. 
+• Use accurate link dimensions. 
+• Verify mathematical equations before execution. 
+• Avoid unrealistic joint angle values. 
+ 
+9. Applications 
+• Robot motion planning 
+• Industrial robot control 
+• Simulation of robotic manipulators 
+• Automation and manufacturing systems 
+ 
+ 
+Quiz: 
+ 
+1) Modify the program for a 4-DOF and 6-DOF robotic arm 
+ 
+ 
+ 
+--- PAGE 33 ---
+ 
+ 
+EXPERIMENT 7 
+Aim: To write and execute computer programs for determining the forward kinematics of 
+different robot configurations and to compute the position of the end-effector. 
+1. Objectives 
+• To understand the concept of forward kinematics 
+• To analyze different robot configurations 
+• To compute end-effector position using programming 
+• To compare kinematic behavior of various robots 
+2. Apparatus / Software Required 
+• Computer System 
+• Programming Language: Python / MATLAB / C 
+• Mathematical libraries 
+• Robot parameters (link lengths, joint variables) 
+3. Theory 
+Forward kinematics is the process of calculating the position and orientation of a robot’s end-
+effector from known joint parameters. 
+Different robot configurations have different kinematic equations depending on joint types 
+(revolute or prismatic). 
+Common robot configurations: 
+a) 
+Cartesian Robot (PPP) 
+b) 
+Cylindrical Robot (RPP) 
+c) 
+Spherical Robot (RRP) 
+d) 
+Planar Articulated Robot (RRR) 
+a) Forward Kinematics of Cartesian Robot (PPP) 
+Description 
+• Three prismatic joints 
+• Motion along X, Y, and Z axes 
+Kinematic Equations 
+𝑥= 𝑑1, 𝑦= 𝑑2, 𝑧= 𝑑3 
+3.1 Forward Kinematics Derivation 
+Forward kinematics in robotics, involves computing the position and orientation of the end-
+effector relative to the base frame given the joint parameters (e.g., angles or displacements). 
+This is achieved using Denavit-Hartenberg (D-H) parameters to define individual 
+--- PAGE 34 ---
+ 
+ 
+homogeneous transformation matrices 𝐴𝑖⁡for each link, then multiplying them sequentially: 
+0𝑇𝑛= 𝐴1𝐴2 ⋯𝐴𝑛. 
+ 
+The general form of 𝐴𝑖based on D-H parameters (𝜃𝑖, 𝑑𝑖, 𝑎𝑖−1, 𝛼𝑖−1) is: 
+ 
+𝐴𝑖= [
+cos 𝜃𝑖
+−sin⁡ 𝜃𝑖cos⁡ 𝛼𝑖−1
+sin⁡ 𝜃𝑖sin⁡ 𝛼𝑖−1
+𝑎𝑖−1cos⁡ 𝜃𝑖
+sin 𝜃𝑖
+cos⁡ 𝜃𝑖cos⁡ 𝛼𝑖−1
+−cos⁡ 𝜃𝑖sin⁡ 𝛼𝑖−1
+𝑎𝑖−1sin⁡ 𝜃𝑖
+0
+sin 𝛼𝑖−1
+cos 𝛼𝑖−1
+𝑑𝑖
+0
+0
+0
+1
+] 
+ 
+The resulting 
+0𝑇𝑛has the rotation matrix in the top-left 3×3 block and the position vector 
+in the top-right 3×1 column. Derivations below use the D-H tables from the book (as previously 
+provided) and compute the product symbolically. 
+ 
+3.1.1. Planar 2R Manipulator: 
+Using the D-H table, compute 𝐴1and 𝐴2, then 𝑇= 𝐴1𝐴2. 
+• 
+𝐴1: 𝛼0 = 0, 𝑎0 = 0, 𝑑1 = 0, 𝜃1(variable). 
+• 
+𝐴2: 𝛼1 = 0, 𝑎1 = 𝑎1, 𝑑2 = 0, 𝜃2(variable). 
+The product yields: 
+0𝑇2 = [
+cos⁡(𝜃1 + 𝜃2)
+−sin⁡(𝜃1 + 𝜃2)
+0
+𝑎1cos⁡ 𝜃1
+sin⁡(𝜃1 + 𝜃2)
+cos⁡(𝜃1 + 𝜃2)
+0
+𝑎1sin⁡ 𝜃1
+0
+0
+1
+0
+0
+0
+0
+1
+] 
+ 
+Position: (𝑥, 𝑦, 𝑧) = (𝑎1cos⁡ 𝜃1, 𝑎1sin⁡ 𝜃1, 0). Orientation: Rotation by (𝜃1 + 𝜃2) about z-axis. 
+This shows the second joint affects orientation but not position extension beyond the first link. 
+  MATLAB Code: Forward Kinematics of 2-DOF Planar Robot 
+Objective : Find end-effector position using joint angles. 
+MATLAB Program 
+clc; 
+clear; 
+ 
+l1 = 1; 
+l2 = 0.5; 
+ 
+theta1 = deg2rad(30); 
+theta2 = deg2rad(45); 
+ 
+x = l1*cos(theta1) + l2*cos(theta1 + theta2); 
+y = l1*sin(theta1) + l2*sin(theta1 + theta2); 
+ 
+fprintf('End Effector Position:\n'); 
+fprintf('x = %.3f m\n', x); 
+fprintf('y = %.3f m\n', y); 
+ 
+3.1.2. Planar 3R Manipulator: 
+--- PAGE 35 ---
+ 
+ 
+Extend to three links: 𝑇= 𝐴1𝐴2𝐴3. 
+• 
+𝐴3: 𝛼2 = 0, 𝑎2 = 𝑎2, 𝑑3 = 0, 𝜃3(variable). 
+The product simplifies to: 
+0𝑇3 = [
+cos⁡(𝜃1 + 𝜃2 + 𝜃3)
+−sin⁡(𝜃1 + 𝜃2 + 𝜃3)
+0
+𝑎1cos⁡ 𝜃1 + 𝑎2cos⁡(𝜃1 + 𝜃2)
+sin⁡(𝜃1 + 𝜃2 + 𝜃3)
+cos⁡(𝜃1 + 𝜃2 + 𝜃3)
+0
+𝑎1sin⁡ 𝜃1 + 𝑎2sin⁡(𝜃1 + 𝜃2)
+0
+0
+1
+0
+0
+0
+0
+1
+] 
+ 
+Position: (𝑥, 𝑦, 𝑧) = (𝑎1cos⁡ 𝜃1 + 𝑎2cos⁡(𝜃1 + 𝜃2), 𝑎1sin⁡ 𝜃1 + 𝑎2sin⁡(𝜃1 + 𝜃2),0). 
+Orientation: Rotation by 𝜃1 + 𝜃2 + 𝜃3 about z-axis. To arrive: Multiply matrices step-by-step, 
+using trig identities like cos⁡(𝛼+ 𝛽) = cos⁡ 𝛼cos⁡ 𝛽−sin⁡ 𝛼sin⁡ 𝛽. 
+ 
+3.1.3. SCARA Manipulator: 
+For 4 DOF: 𝑇= 𝐴1𝐴2𝐴3𝐴4. 
+• 
+𝐴3: Prismatic, 𝜃3 = 0(fixed), 𝑑3(variable). 
+• 
+𝐴4: 𝛼3 = 0, 𝑎3 = 0, 𝑑4 = 0, 𝜃4(variable). 
+The product is: 
+0𝑇4 = [
+cos⁡(𝜃1 + 𝜃2 + 𝜃4)
+−sin⁡(𝜃1 + 𝜃2 + 𝜃4)
+0
+𝑎1cos⁡ 𝜃1 + 𝑎2cos⁡(𝜃1 + 𝜃2)
+sin⁡(𝜃1 + 𝜃2 + 𝜃4)
+cos⁡(𝜃1 + 𝜃2 + 𝜃4)
+0
+𝑎1sin⁡ 𝜃1 + 𝑎2sin⁡(𝜃1 + 𝜃2)
+0
+0
+1
+𝑑3
+0
+0
+0
+1
+] 
+ 
+Position: (𝑥, 𝑦, 𝑧) = (𝑎1cos⁡ 𝜃1 + 𝑎2cos⁡(𝜃1 + 𝜃2), 𝑎1sin⁡ 𝜃1 + 𝑎2sin⁡(𝜃1 + 𝜃2), 𝑑3). 
+Orientation: Rotation by 𝜃1 + 𝜃2 + 𝜃4about z-axis. Derivation: Note 𝐴3is pure translation 
+along z (since 𝜃3 = 0), so it decouples z from planar xy motion. 
+ 
+ 
+3.1.4. PUMA 560 Manipulator: 
+For this 6-DOF anthropomorphic arm: 𝑇= 𝐴1𝐴2𝐴3𝐴4𝐴5𝐴6. 
+The full matrix is complex due to twists (𝛼= ±90∘): 
+Let 𝑐𝑖= cos⁡ 𝜃𝑖, 𝑠𝑖= sin⁡ 𝜃𝑖, 𝑐𝑖𝑗= cos⁡(𝜃𝑖+ 𝜃𝑗), etc. 
+Rotation matrix elements (top-left 3×3): 
+• 
+𝑟11 = ((𝑐1𝑐2𝑐3 −𝑠1𝑠3)𝑐4 −𝑐1𝑠2𝑠4)𝑐5 + (−𝑐1𝑐2𝑠3 −𝑠1𝑐3)𝑠5 
+• 
+And similarly for others (full expansion follows the matrix multiplication chain). 
+Position (top-right column): 
+𝑝𝑥= 𝑐1(𝑎2𝑐2 + 𝑎3𝑐23 + 𝑑4𝑠23) 
+ 
+𝑝𝑦= 𝑠1(𝑎2𝑐2 + 𝑎3𝑐23 + 𝑑4𝑠23) 
+ 
+𝑝𝑧= −𝑎2𝑠2 −𝑎3𝑠23 + 𝑑3 + 𝑑4𝑐23 
+ 
+To derive: Start with arm (links 1-3) for shoulder-elbow position, then wrist (4-6) for 
+--- PAGE 36 ---
+ 
+ 
+orientation. Multiply matrices, grouping trig terms. The book provides numerical examples 
+with specific link lengths. 
+ 
+The rotation matrix involves spherical wrist terms, similar to PUMA but with prismatic 
+extension. Derivation: 𝐴1and 𝐴2⁡handle base rotations, 𝐴3⁡extends radially, and 𝐴4-𝐴6 orient 
+the end-effector. Compute product by associating base-to-arm and wrist separately for 
+simplification. 
+ 
+4. Observation 
+• Each robot configuration produces different workspace shapes. 
+• End-effector position varies based on joint type and parameters. 
+• Computed values match theoretical forward kinematics equations. 
+ 
+5. Result 
+Thus, computer codes for forward kinematics of different robot configurations were 
+successfully written and executed, and the end-effector positions were determined. 
+ 
+6. Precautions 
+• Convert angles from degrees to radians correctly. 
+• Use correct joint parameters. 
+• Verify equations before coding. 
+• Avoid exceeding joint limits. 
+ 
+7. Applications 
+• Robot simulation 
+• Industrial automation 
+• Motion planning 
+• Robotics research 
+ 
+Quiz: 
+1) Define description of Position, orientation and frame.  
+2) Explain translation mapping.  
+3) Explain rotational parameters with suitable example. 
+4) Define X-Y-Z fixed angles.  
+5) List and explain the properties of homogeneous transformation matrix. 
+--- PAGE 37 ---
+ 
+ 
+6) List the important properties of rotation matrices. 
+7) Derive generalized equation of D-H convention.  
+8) Explain why homogeneous coordinates are required in modelling of robotics manipulators. 
+9) Explain why homogeneous transformations are required in modelling of robotics manipulators. 
+10) What are global and local scale factors? When these are useful? Give one situation each where global 
+scale factor is less than one and more than one. 
+ 
+ 
+--- PAGE 38 ---
+ 
+ 
+EXPERIMENT 8 
+ 
+Aim: Write computer codes for inverse kinematics of different robot configurations. 
+1. Learning Objectives 
+After performing this experiment, students will be able to: 
+• Understand inverse kinematics concepts 
+• Identify different robot configurations 
+• Derive inverse kinematics equations 
+• Write computer programs for IK 
+• Analyze multiple IK solutions 
+2.  Apparatus / Software Required 
+• Computer system 
+• Python / MATLAB / Octave 
+• Calculator 
+3. Theory 
+3.1. 
+Inverse Kinematics 
+Inverse kinematics (IK) is the process of calculating the joint parameters required to position the 
+robot end-effector at a desired location. Unlike forward kinematics, IK may have multiple solutions, 
+no solution, or may lead to singularities. 
+3.2. 
+Robot Configurations Studied 
+3.2.1. 2-DOF Planar Revolute–Revolute (RR) Robot 
+3.2.2. 2-DOF Planar Prismatic–Revolute (PR) Robot 
+3.2.3. 3-DOF SCARA Robot (RR-P) 
+4. Mathematical Modeling 
+A) 2-DOF Planar RR Robot 
+Given: 
+• Link lengths: 𝐿1, 𝐿2 
+• End-effector position: (𝑥, 𝑦) 
+• Joint variables: 𝜃1, 𝜃2 
+Inverse Kinematics Equations: 
+--- PAGE 39 ---
+ 
+ 
+cos⁡(𝜃2) = 𝑥2 + 𝑦2 −𝐿1
+2 −𝐿2
+2
+2𝐿1𝐿2
+ 
+𝜃2 = cos⁡−1(⋅) 
+𝜃1 = tan⁡−1 (𝑦
+𝑥) −tan⁡−1 (
+𝐿2sin⁡ 𝜃2
+𝐿1 + 𝐿2cos⁡ 𝜃2
+) 
+B) 2-DOF Planar PR Robot 
+Given: 
+• Prismatic joint displacement: 𝑑1 
+• Revolute joint angle: 𝜃2 
+Inverse Kinematics Equations: 
+𝑑1 = √𝑥2 + 𝑦2 
+𝜃2 = tan⁡−1 (𝑦
+𝑥) 
+C) 3-DOF SCARA Robot (RR-P) 
+Given: 
+• Link lengths: 𝐿1, 𝐿2 
+• End-effector position: (𝑥, 𝑦, 𝑧) 
+• Joint variables: 𝜃1, 𝜃2, 𝑑3 
+Inverse Kinematics Equations: 
+cos⁡(𝜃2) = 𝑥2 + 𝑦2 −𝐿1
+2 −𝐿2
+2
+2𝐿1𝐿2
+ 
+𝜃2 = cos⁡−1(⋅) 
+𝜃1 = tan⁡−1 (𝑦
+𝑥) −tan⁡−1 (
+𝐿2sin⁡ 𝜃2
+𝐿1 + 𝐿2cos⁡ 𝜃2
+) 
+𝑑3 = 𝑧0 −𝑧 
+Where 𝑧0is the reference height of the robot base. 
+5. Algorithm 
+For RR and SCARA Robots 
+1. Input link lengths 
+2. Input end-effector coordinates 
+3. Compute 𝜃2 
+4. Compute 𝜃1 
+5. Compute prismatic displacement (for SCARA) 
+--- PAGE 40 ---
+ 
+ 
+6. Display joint variables 
+For PR Robot 
+1. 
+Input end-effector coordinates 
+2. 
+Compute prismatic displacement 
+3. 
+Compute revolute angle 
+4. 
+Display joint variables 
+ 
+6. Program Code (Python) 
+A) RR Robot Inverse Kinematics 
+import math 
+L1 = float(input("Enter L1: ")) 
+L2 = float(input("Enter L2: ")) 
+x = float(input("Enter x: ")) 
+y = float(input("Enter y: ")) 
+ 
+cos_t2 = (x**2 + y**2 - L1**2 - L2**2) / (2 * L1 * L2) 
+theta2 = math.acos(cos_t2) 
+theta1 = math.atan2(y, x) - math.atan2(L2 * math.sin(theta2), 
+                                       L1 + L2 * math.cos(theta2)) 
+print("Theta1 (deg):", math.degrees(theta1)) 
+print("Theta2 (deg):", math.degrees(theta2)) 
+ 
+B) PR Robot Inverse Kinematics 
+import math 
+x = float(input("Enter x: ")) 
+y = float(input("Enter y: ")) 
+ 
+d1 = math.sqrt(x**2 + y**2) 
+theta2 = math.atan2(y, x) 
+--- PAGE 41 ---
+ 
+ 
+ 
+print("Prismatic joint d1:", d1) 
+print("Theta2 (deg):", math.degrees(theta2)) 
+C) SCARA Robot Inverse Kinematics 
+import math 
+L1 = float(input("Enter L1: ")) 
+L2 = float(input("Enter L2: ")) 
+x = float(input("Enter x: ")) 
+y = float(input("Enter y: ")) 
+z = float(input("Enter z: ")) 
+z0 = float(input("Enter base height z0: ")) 
+ 
+cos_t2 = (x**2 + y**2 - L1**2 - L2**2) / (2 * L1 * L2) 
+theta2 = math.acos(cos_t2) 
+theta1 = math.atan2(y, x) - math.atan2(L2 * math.sin(theta2), 
+                                       L1 + L2 * math.cos(theta2)) 
+d3 = z0 - z 
+ 
+print("Theta1 (deg):", math.degrees(theta1)) 
+print("Theta2 (deg):", math.degrees(theta2)) 
+print("Prismatic joint d3:", d3) 
+7. Observations 
+• Inverse kinematics may give multiple solutions 
+• Some positions are unreachable 
+• SCARA robot separates planar and vertical motion 
+• Numerical errors occur near singularities 
+ 
+8. Result 
+Inverse kinematics for RR, PR, and SCARA robot configurations were successfully implemented 
+--- PAGE 42 ---
+ 
+ 
+using computer programming, and the corresponding joint variables were obtained for given end-
+effector positions. 
+Quiz:  
+1. 
+What is inverse kinematics? 
+2. 
+What is singularity? 
+ 
+ 
+--- PAGE 43 ---
+ 
+ 
+EXPERIMENT 9 
+ 
+ 
+Aim: Write computer codes for Jacobian matrix of different robot configurations  
+of different robot configurations such as:  
+• 2-DOF Planar RR Robot 
+• 2-DOF Planar PR Robot 
+• 3-DOF SCARA Robot 
+ 
+1. 
+Learning Objectives 
+After performing this experiment, students will be able to: 
+• Understand the physical meaning of the Jacobian matrix 
+• Relate joint velocities to end-effector velocities 
+• Derive Jacobian matrices analytically 
+• Identify singular configurations 
+• Write computer code to compute Jacobian matrices 
+ 
+2. Apparatus / Software Required 
+• Computer system 
+• Python / MATLAB / Octave 
+ 
+3. Theory 
+Jacobian Matrix in Robotics 
+The Jacobian matrix (J) relates joint velocities to end-effector linear and angular velocities.
+ 
+ 
+𝑋̇ = 𝐽(𝑞)𝑞̇ 
+ 
+Where: 
+• 𝑋̇= End-effector velocity vector 
+• 𝑞̇= Joint velocity vector 
+• 𝐽(𝑞)= Jacobian matrix 
+ 
+➢ Importance of Jacobian 
+• Velocity analysis 
+• Force analysis 
+• Singularity detection 
+• Robot control 
+• Trajectory planning 
+4. Robot Configurations Studied 
+1. 
+2-DOF Planar RR Robot 
+2. 
+2-DOF Planar PR Robot 
+3. 
+3-DOF SCARA Robot 
+ 
+5. Mathematical Modelling 
+ 
+A) 2-DOF Planar RR Robot 
+Forward Kinematics 
+𝑥= 𝐿1cos⁡ 𝜃1 + 𝐿2cos⁡(𝜃1 + 𝜃2) 
+𝑦= 𝐿1sin⁡ 𝜃1 + 𝐿2sin⁡(𝜃1 + 𝜃2) 
+ 
+ 
+Jacobian Matrix 
+𝐽= [−𝐿1sin⁡ 𝜃1 −𝐿2sin⁡(𝜃1 + 𝜃2)
+−𝐿2sin⁡(𝜃1 + 𝜃2)
+𝐿1cos⁡ 𝜃1 + 𝐿2cos⁡(𝜃1 + 𝜃2)
+𝐿2cos⁡(𝜃1 + 𝜃2) ] 
+ 
+--- PAGE 44 ---
+ 
+ 
+ 
+B) 2-DOF Planar PR Robot 
+Forward Kinematics 
+𝑥= 𝑑1cos⁡ 𝜃2 
+𝑦= 𝑑1sin⁡ 𝜃2 
+ 
+ 
+Jacobian Matrix 
+𝐽= [cos 𝜃2
+−𝑑1sin⁡ 𝜃2
+sin 𝜃2
+𝑑1cos⁡ 𝜃2 ] 
+ 
+ 
+C) 3-DOF SCARA Robot (RR-P) 
+Planar motion similar to RR robot with additional vertical motion. 
+Position Equations 
+𝑥= 𝐿1cos⁡ 𝜃1 + 𝐿2cos⁡(𝜃1 + 𝜃2) 
+𝑦= 𝐿1sin⁡ 𝜃1 + 𝐿2sin⁡(𝜃1 + 𝜃2) 
+𝑧= 𝑧0 −𝑑3 
+ 
+ 
+Jacobian Matrix 
+𝐽= [
+−𝐿1sin⁡ 𝜃1 −𝐿2sin⁡(𝜃1 + 𝜃2)
+−𝐿2sin⁡(𝜃1 + 𝜃2)
+0
+𝐿1cos⁡ 𝜃1 + 𝐿2cos⁡(𝜃1 + 𝜃2)
+𝐿2cos⁡(𝜃1 + 𝜃2)
+0
+0
+0
+−1
+] 
+ 
+ 
+6. Algorithm 
+For RR Robot 
+• Input link lengths 𝐿1, 𝐿2 
+• Input joint angles 𝜃1, 𝜃2 
+• Compute partial derivatives 
+• Form Jacobian matrix 
+• Display matrix 
+ 
+For PR Robot 
+• 
+Input 𝑑1, 𝜃2 
+• 
+Compute derivatives 
+• 
+Form Jacobian matrix 
+• 
+Display 
+ 
+For SCARA Robot 
+• Input 𝐿1, 𝐿2, 𝜃1, 𝜃2 
+• Compute planar Jacobian 
+• Add vertical row 
+• Display matrix 
+ 
+7. Program Code (Python) 
+ 
+A) RR Robot Jacobian 
+import math 
+ 
+L1 = float(input("Enter L1: ")) 
+L2 = float(input("Enter L2: ")) 
+theta1 = math.radians(float(input("Enter theta1 (deg): "))) 
+theta2 = math.radians(float(input("Enter theta2 (deg): "))) 
+--- PAGE 45 ---
+ 
+ 
+ 
+J11 = -L1*math.sin(theta1) - L2*math.sin(theta1+theta2) 
+J12 = -L2*math.sin(theta1+theta2) 
+J21 = L1*math.cos(theta1) + L2*math.cos(theta1+theta2) 
+J22 = L2*math.cos(theta1+theta2) 
+ 
+print("Jacobian Matrix:") 
+print([[J11, J12], 
+       [J21, J22]]) 
+ 
+B) PR Robot Jacobian 
+import math 
+ 
+d1 = float(input("Enter d1: ")) 
+theta2 = math.radians(float(input("Enter theta2 (deg): "))) 
+ 
+J11 = math.cos(theta2) 
+J12 = -d1*math.sin(theta2) 
+J21 = math.sin(theta2) 
+J22 = d1*math.cos(theta2) 
+ 
+print("Jacobian Matrix:") 
+print([[J11, J12], 
+       [J21, J22]]) 
+ 
+C) SCARA Robot Jacobian 
+import math 
+ 
+L1 = float(input("Enter L1: ")) 
+L2 = float(input("Enter L2: ")) 
+theta1 = math.radians(float(input("Enter theta1 (deg): "))) 
+theta2 = math.radians(float(input("Enter theta2 (deg): "))) 
+ 
+J11 = -L1*math.sin(theta1) - L2*math.sin(theta1+theta2) 
+J12 = -L2*math.sin(theta1+theta2) 
+J13 = 0 
+ 
+J21 = L1*math.cos(theta1) + L2*math.cos(theta1+theta2) 
+J22 = L2*math.cos(theta1+theta2) 
+J23 = 0 
+ 
+J31 = 0 
+J32 = 0 
+J33 = -1 
+ 
+print("Jacobian Matrix:") 
+print([[J11, J12, J13], 
+       [J21, J22, J23], 
+       [J31, J32, J33]]) 
+ 
+8. Observations 
+• 
+Jacobian becomes singular when determinant = 0 
+• 
+RR robot singularity occurs when links are aligned 
+• 
+SCARA singularity occurs in planar alignment 
+• 
+PR robot singularity when 𝑑1 = 0 
+ 
+--- PAGE 46 ---
+ 
+ 
+9. Result 
+The Jacobian matrices for RR, PR, and SCARA robot configurations were successfully 
+derived and implemented using computer programming. The relationship between joint 
+velocities and end-effector velocities was verified. 
+ 
+10. Applications 
+• 
+Robot velocity control 
+• 
+Force control 
+• 
+Singularity analysis 
+• 
+Motion planning 
+• 
+Industrial automation 
+ 
+ 
+Quiz: 
+ 
+1. 
+What is the physical meaning of Jacobian? 
+2. 
+Why determinant of Jacobian is important? 
+3. 
+Difference between geometric and analytical Jacobian? 
+4. 
+How is Jacobian used in robot control? 
+ 
+ 
+--- PAGE 47 ---
+ 
+ 
+ 
+ 
+ 
+ 
+Elements of Robotics & Kinematics 
+(BE04041011) 
+ 
+Lab Manuals 
+ Prepared by 
+ 
+Prof. Mahendra Y Patil 
+Associate Professor 
+Mechanical Engineering Department 
+L. D. College of Engineering, Ahmedabad 
+ 
+ 
+ 
+Branch Coordinator 
+Dr. K G Dave  
+Professor  
+Mechanical Engineering Department 
+L. D. College of Engineering, Ahmedabad 
+ 
+ 
+Committee Chairman 
+Dr. N M Bhatt 
+Professor 
+Mechanical Engineering Department 
+L. E. College, Morbi 
