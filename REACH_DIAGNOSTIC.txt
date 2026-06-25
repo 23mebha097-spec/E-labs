@@ -1,0 +1,31 @@
+"""
+Diagnostic tool to check for joint relation issues during IK/animation.
+Run this to see which joints might be causing reach problems.
+"""
+
+import sys
+import os
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+print("To diagnose the reach issue, follow these steps:")
+print("\n1. In the GUI, enter the target point (30, -30, 30)")
+print("2. Click 'Solve IK'")
+print("3. Check the terminal output - it should show:")
+print("   - 'Position error: 0.000 cm' (or very small)")
+print("   - The IK solution joint angles")
+print("\n4. Observe what happens during animation:")
+print("   - Does the robot move smoothly?")
+print("   - Does it reach close to the target but not exactly?")
+print("   - Are there any warnings in the terminal?")
+print("\nCommon causes of reach issues:")
+print("  a) Joint relations (gears/links) - slave joints clipping at limits")
+print("  b) Collision avoidance - might prevent reaching extreme poses")
+print("  c) Joint limits - target solution found at boundary limits")
+print("  d) Animation speed too slow - animation stopping prematurely")
+print("\nTo fix this, you might need to:")
+print("  - Check if the default robot has joint relations configured")
+print("  - Verify joint limits are appropriate for the (30, -30, 30) reach")
+print("  - Disable collision checking during animation (if enabled)")
+print("  - Increase animation speed setting")

@@ -116,6 +116,20 @@ pip install -r requirements.txt
 python main.py
 ```
 
+**Slow first launch?** PyVista, VTK, and SciPy load thousands of files on startup. If the project or `.venv` lives under **OneDrive**, the first run can take **1–2 minutes**. Wait until the terminal shows `[3/3] Application Ready.`—do not press Ctrl+C (that raises `KeyboardInterrupt` during import).
+
+To speed up development:
+
+- Move the repo to a local folder (for example `C:\dev\E-labs`) and recreate `.venv` there, or
+- Exclude `.venv` from OneDrive sync, or
+- Pause OneDrive while running the app.
+
+Verify imports before running the GUI:
+
+```powershell
+python -c "import pyvista; import scipy; print('OK')"
+```
+
 ---
 
 ## Basic Workflow

@@ -205,10 +205,14 @@ class NavigationMixin:
                 if w_pos[2] > best_z:
                     best_z = w_pos[2]
                     tcp_link = link
-        
         if tcp_link:
-            # Use Tool Point for accurate LP display
-            pos, _, _ = self.get_link_tool_point(tcp_link)
+            self._refresh_auto_tcp_offset(tcp_link)
+
+            # Use the kinematic TCP pose for coordinate display.
+            # This is the same transform the IK solver targets, so the
+            # displayed position always matches the IK solution exactly.
+            tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+            pos = tcp_pose[:3, 3].copy()
 
             ratio = self.canvas.grid_units_per_cm
             lx, ly, lz = pos[0] / ratio, pos[1] / ratio, pos[2] / ratio
@@ -237,14 +241,35 @@ class NavigationMixin:
             if hasattr(self.canvas, 'update_hud_coords'):
                 self.canvas.update_hud_coords(lx, ly, lz, render=render)
             if hasattr(self.canvas, 'update_live_point_marker'):
+                # Use the exact grid-unit position for marker alignment
                 self.canvas.update_live_point_marker(pos, render=render)
 
             # Pick-and-Place Simulation Logic (MAGNET MODE)
+            # Uses mesh-based tool point for accurate contact geometry.
             sim_tab = getattr(self, 'simulation_tab', None)
             if sim_tab and hasattr(sim_tab, 'is_sim_active') and sim_tab.is_sim_active:
-                self._handle_sim_pick_place(tcp_link, pos, ratio)
+                sim_pos, _, _ = self.get_link_tool_point(tcp_link)
+                self._handle_sim_pick_place(tcp_link, sim_pos, ratio)
         else:
-            self.current_live_point_cm = None
+            lx, ly, lz = 0.0, 0.0, 0.0
+            self.current_live_point_cm = (lx, ly, lz)
+
+            live_x = getattr(self, "live_x", None)
+            live_y = getattr(self, "live_y", None)
+            live_z = getattr(self, "live_z", None)
+            if all(widget is not None for widget in (live_x, live_y, live_z)):
+                live_x.blockSignals(True)
+                live_y.blockSignals(True)
+                live_z.blockSignals(True)
+                live_x.setValue(lx)
+                live_y.setValue(ly)
+                live_z.setValue(lz)
+                live_x.blockSignals(False)
+                live_y.blockSignals(False)
+                live_z.blockSignals(False)
+
+            if hasattr(self.canvas, 'update_hud_coords'):
+                self.canvas.update_hud_coords(lx, ly, lz, render=render)
             if hasattr(self.canvas, 'clear_live_point_marker'):
                 self.canvas.clear_live_point_marker()
 
@@ -482,6 +507,45 @@ class NavigationMixin:
             if return_vec: return np.zeros(3), np.zeros(3), None
             return np.zeros(3), np.zeros(3), 0.0
 
+        def mesh_vertices_world(mesh_link):
+            if mesh_link is None or mesh_link.mesh is None:
+                return None
+            verts = np.array(getattr(mesh_link.mesh, "vertices", []), dtype=float)
+            if verts.size == 0:
+                return None
+            verts = verts.reshape((-1, 3))
+            verts_h = np.hstack([verts, np.ones((len(verts), 1))])
+            return (np.array(mesh_link.t_world, dtype=float) @ verts_h.T).T[:, :3]
+
+        def distal_point(mesh_link, origin_world):
+            world_pts = mesh_vertices_world(mesh_link)
+            if world_pts is None:
+                return None
+            distances = np.linalg.norm(world_pts - origin_world, axis=1)
+            if distances.size == 0:
+                return None
+            max_dist = float(np.max(distances))
+            tolerance = max(max_dist * 0.01, 1e-6)
+            tip_pts = world_pts[distances >= (max_dist - tolerance)]
+            if tip_pts.size == 0:
+                tip_pts = world_pts[[int(np.argmax(distances))]]
+            return np.mean(tip_pts, axis=0)
+
+        def upper_contact_point(mesh_link):
+            world_pts = mesh_vertices_world(mesh_link)
+            if world_pts is None:
+                return None
+            max_z = float(np.max(world_pts[:, 2]))
+            tolerance = max(np.ptp(world_pts[:, 2]) * 0.01, 1e-6)
+            upper_pts = world_pts[world_pts[:, 2] >= (max_z - tolerance)]
+            if upper_pts.size == 0:
+                upper_pts = world_pts[[int(np.argmax(world_pts[:, 2]))]]
+            return np.mean(upper_pts, axis=0)
+
+        def remember_auto_tcp(local_tool_point):
+            if getattr(link, "custom_tcp_offset", None) is None:
+                link.auto_tcp_offset = np.array(local_tool_point, dtype=float)
+
         # 1. Identify 'Fingers'
         fingers = []
         for joint in link.child_joints:
@@ -513,22 +577,28 @@ class NavigationMixin:
                 return world_tool_point, local_tool_point, None
             return world_tool_point, local_tool_point, gap
 
-        # 2. Case: Multiple Fingers (Midpoint TCP Fallback)
+        # 2. Case: Multiple Fingers (upper exposed contact point)
         if len(fingers) >= 2:
             pts_world = []
             pts_local = []
+            hand_origin = np.array(link.t_world[:3, 3], dtype=float)
             for f in fingers:
-                if f.mesh:
-                    b = f.mesh.bounds
-                    c_finger = (b[0] + b[1]) / 2.0
-                    w_pt = (f.t_world @ np.append(c_finger, 1.0))[:3]
-                    pts_world.append(w_pt)
-                    inv_hand = np.linalg.inv(link.t_world)
-                    pt_in_hand = (inv_hand @ np.append(w_pt, 1.0))[:3]
-                    pts_local.append(pt_in_hand)
+                w_pt = upper_contact_point(f)
+                if w_pt is None:
+                    w_pt = distal_point(f, hand_origin)
+                if w_pt is None:
+                    continue
+                pts_world.append(w_pt)
+                inv_hand = np.linalg.inv(link.t_world)
+                pt_in_hand = (inv_hand @ np.append(w_pt, 1.0))[:3]
+                pts_local.append(pt_in_hand)
             if pts_local:
-                local_tool_point = np.mean(pts_local, axis=0)
+                pts_local_np = np.array(pts_local, dtype=float)
+                upper_z = np.max(pts_local_np[:, 2])
+                upper_local_pts = pts_local_np[pts_local_np[:, 2] >= (upper_z - 1e-6)]
+                local_tool_point = np.mean(upper_local_pts, axis=0)
                 world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
+                remember_auto_tcp(local_tool_point)
                 max_span = 0.0
                 best_vec = np.array([1.0, 0.0, 0.0])
                 for i in range(len(pts_world)):
@@ -539,23 +609,71 @@ class NavigationMixin:
                             max_span = d
                             best_vec = v
                 real_gap = max_span
+                finger_depth = 0.0
+                all_local = []
+                inv_hand = np.linalg.inv(link.t_world)
+                for f in fingers:
+                    f_world = mesh_vertices_world(f)
+                    if f_world is not None:
+                        f_local = (inv_hand @ np.hstack([f_world, np.ones((len(f_world), 1))]).T).T[:, :3]
+                        all_local.append(f_local)
+                if all_local:
+                    all_local = np.vstack(all_local)
+                    finger_depth = float(np.ptp(all_local[:, 2]))
+                geo = {
+                    "real_gap": real_gap,
+                    "finger_depth": finger_depth,
+                    "fingers_world": pts_world,
+                    "primary_axis": best_vec,
+                    "contact_mode": "upper",
+                }
                 if return_vec:
-                    return world_tool_point, local_tool_point, {"real_gap": real_gap}
+                    return world_tool_point, local_tool_point, geo
                 return world_tool_point, local_tool_point, real_gap
 
         # 3. Fallback: Standard leaf or mesh-top point
         if not link.mesh:
             res = (link.t_world[:3, 3], np.zeros(3), None)
             return res if return_vec else (res[0], res[1], 0.0)
-        bounds = link.mesh.bounds 
-        center_x = (bounds[0][0] + bounds[1][0]) / 2.0
-        center_y = (bounds[0][1] + bounds[1][1]) / 2.0
-        top_z = bounds[1][2]
-        local_tool_point = np.array([center_x, center_y, top_z])
+
+        parent_link = getattr(getattr(link, "parent_joint", None), "parent_link", None)
+        origin_world = (
+            np.array(parent_link.t_world[:3, 3], dtype=float)
+            if parent_link is not None
+            else np.zeros(3, dtype=float)
+        )
+        world_tip = upper_contact_point(link)
+        if world_tip is None:
+            world_tip = distal_point(link, origin_world)
+        if world_tip is not None:
+            inv_link = np.linalg.inv(link.t_world)
+            local_tool_point = (inv_link @ np.append(world_tip, 1.0))[:3]
+        else:
+            bounds = link.mesh.bounds
+            center_x = (bounds[0] + bounds[1]) / 2.0
+            center_y = (bounds[2] + bounds[3]) / 2.0
+            top_z = bounds[5]
+            local_tool_point = np.array([center_x, center_y, top_z])
         world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
+        remember_auto_tcp(local_tool_point)
         if return_vec:
-            return world_tool_point, local_tool_point, None
+            return world_tool_point, local_tool_point, {"contact_mode": "upper"}
         return world_tool_point, local_tool_point, None
+
+    def _refresh_auto_tcp_offset(self, tcp_link):
+        """Update an automatic TCP offset from current world gripper geometry."""
+        if tcp_link is None or getattr(tcp_link, "custom_tcp_offset", None) is not None:
+            return
+        try:
+            before = None
+            if getattr(tcp_link, "auto_tcp_offset", None) is not None:
+                before = np.array(tcp_link.auto_tcp_offset, dtype=float).copy()
+            self.get_link_tool_point(tcp_link)
+            after = getattr(tcp_link, "auto_tcp_offset", None)
+            if before is not None and after is not None and np.allclose(before, after, atol=1e-6):
+                return
+        except Exception:
+            pass
 
     def show_speed_overlay(self):
         """Displays current speed percentage on the 3D canvas temporarily"""
@@ -582,7 +700,12 @@ class NavigationMixin:
         import html as html_mod
         safe = html_mod.escape(str(text))
         lower = safe.lower()
-        if any(k in lower for k in ['error', '❌', 'fail']): color = '#f44336'
+        if (
+            lower.startswith('error')
+            or lower.startswith('python error')
+            or any(k in lower for k in ['❌', 'fail', 'failed', 'crash'])
+        ):
+            color = '#f44336'
         elif any(k in lower for k in ['success', 'finished', 'loaded', 'saved', '✅']): color = '#4caf50'
         elif any(k in lower for k in ['warning', '⚠']): color = '#ff9800'
         else: color = '#d4d4d4'
@@ -608,16 +731,15 @@ class NavigationMixin:
             self.show_toast("No joints defined yet", "warning")
             return
             
-        from core.script_gen import generate_python_script, generate_matlab_script
+        from core.script_gen import generate_python_script
         
         arduino_code = generate_esp32_firmware(self.robot, default_speed=self.current_speed)
         python_code = generate_python_script(self.robot)
-        matlab_code = generate_matlab_script(self.robot)
         
-        self.code_drawer.set_codes(arduino_code, python_code, matlab_code)
+        self.code_drawer.set_codes(arduino_code, python_code)
         self.code_drawer.show()
         self.main_splitter.setSizes([350, 450, 400])
-        self.log("⚡ Cross-Platform Code (ESP32/Python/Matlab) Generated in Sidebar.")
+        self.log("⚡ Cross-Platform Code (ESP32/Python) Generated in Sidebar.")
         self.show_toast("Robot code built successfully", "success")
 
     def show_toast(self, message, toast_type='info', duration=3000):
@@ -721,6 +843,7 @@ class NavigationMixin:
             return False, "No TCP found"
 
         # 1. Calculate Target Pose
+        self.get_link_tool_point(tcp_link)
         ratio = self.canvas.grid_units_per_cm
         target_world = np.array([x_cm, y_cm, z_cm]) * ratio
         
@@ -731,42 +854,39 @@ class NavigationMixin:
         old_angles = {name: joint.current_value for name, joint in self.robot.joints.items()}
         chain = self.robot.get_kinematic_chain(tcp_link)
         
-        # 3. Solve IK
+        # 3. Solve IK with precision tolerance (0.01 cm = 0.1 mm)
         success, info = self.robot.inverse_kinematics_pose(
             target_tcp_pose,
             tcp_link,
-            max_iters=1000,
-            position_tolerance=max(0.1 * ratio, 0.1),
+            max_iters=3000,
+            position_tolerance=0.01 * ratio,
             orientation_tolerance=1e6,
             orientation_weight=0.0,
             joint_change_weight=0.35,
         )
 
-        # Fallback: try nearest point
         if not success:
-            workspace_hint = self.robot.get_workspace_target_hint(target_world, tcp_link)
-            if workspace_hint.get("ok") and not workspace_hint.get("inside_workspace", True):
-                for name, val in old_angles.items():
-                    self.robot.joints[name].current_value = val
-                self.robot.update_kinematics()
-
-                fallback_world = np.array(workspace_hint["nearest_point"], dtype=float)
-                fallback_tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
-                fallback_tcp_pose[:3, 3] = fallback_world
-                success, info = self.robot.inverse_kinematics_pose(
-                    fallback_tcp_pose,
-                    tcp_link,
-                    max_iters=1000,
-                    position_tolerance=max(0.1 * ratio, 0.1),
-                    orientation_tolerance=1e6,
-                    orientation_weight=0.0,
-                    joint_change_weight=0.35,
-                )
+            for name, val in old_angles.items():
+                self.robot.joints[name].current_value = val
+            self.robot.update_kinematics()
+            self.log(f"Not possible to reach target ({x_cm:.2f}, {y_cm:.2f}, {z_cm:.2f}) cm.")
+            self.show_toast("Not possible", "warning")
+            return False, info
 
         # 4. Extract results
         ordered_child_names = [joint.child_link.name for joint in chain]
         ordered_joint_ids = [joint.name for joint in chain]
         new_angles = [joint.current_value for joint in chain]
+        
+        # Log actual reached position
+        actual_tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+        actual_pos_cm = actual_tcp_pose[:3, 3] / ratio
+        actual_error = np.linalg.norm(np.array(actual_pos_cm) - np.array([x_cm, y_cm, z_cm]))
+        
+        self.log(f"Target: ({x_cm:.3f}, {y_cm:.3f}, {z_cm:.3f}) cm")
+        self.log(f"Reached: ({actual_pos_cm[0]:.3f}, {actual_pos_cm[1]:.3f}, {actual_pos_cm[2]:.3f}) cm")
+        self.log(f"Position error: {actual_error:.3f} cm")
+        
         if isinstance(info, dict) and "motion_total_abs_deg" in info:
             self.log(
                 "Minimal-motion IK selected "
@@ -779,7 +899,7 @@ class NavigationMixin:
             self.robot.joints[name].current_value = value
         self.robot.update_kinematics()
 
-        # 6. Start Animation
+        # 6. Start Animation - only animate joints that actually moved
         moved_joint_ids = []
         moved_child_names = []
         moved_targets = []
@@ -818,3 +938,4 @@ class NavigationMixin:
             QSplitter::handle { background-color: #bbb; }
             QSplitter::handle:hover { background-color: #1976d2; }
         """)
+

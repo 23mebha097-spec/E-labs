@@ -48,6 +48,7 @@ class Link:
 
         # TCP / live point relative to the flange link frame.
         self.custom_tcp_offset = None
+        self.auto_tcp_offset = None
         self.custom_tcp_rpy_deg = [0.0, 0.0, 0.0]
 
         self.import_metadata = {}
@@ -142,10 +143,15 @@ class Robot:
         self.workspace_report = None
         self.structure_report = None
         self.ik_experience = {}
+        self.home_joint_values = {}
 
-    def reset_to_home(self, home_angle=0.0):
+    def reset_to_home(self, home_angle=0.0, home_joint_values=None):
+        home_joint_values = home_joint_values or self.home_joint_values
         for joint in self.joints.values():
-            joint.current_value = home_angle
+            if joint.name in home_joint_values:
+                joint.current_value = float(home_joint_values[joint.name])
+            else:
+                joint.current_value = home_angle
         self.update_kinematics()
 
     def add_joint_relation(self, master, slave, ratio=1.0):
@@ -253,6 +259,8 @@ class Robot:
         if tcp_link is None:
             return np.eye(4)
         offset = getattr(tcp_link, "custom_tcp_offset", None)
+        if offset is None:
+            offset = getattr(tcp_link, "auto_tcp_offset", None)
         if offset is None:
             offset = np.zeros(3, dtype=float)
         rpy_deg = getattr(tcp_link, "custom_tcp_rpy_deg", [0.0, 0.0, 0.0])
@@ -903,6 +911,42 @@ class Robot:
             "inside_workspace": bool(inside_workspace),
         }
 
+    def _posture_penalty(self, chain, joint_vector):
+        """Estimate how far a candidate pose is from a natural industrial posture.
+
+        The penalty favors mid-range joint values over extreme folded or wrist-heavy
+        configurations, which helps the IK solver avoid awkward elbow folding and
+        sudden flips when multiple solutions are possible.
+        """
+        values = np.asarray(joint_vector, dtype=float)
+        penalty = 0.0
+
+        for idx, joint in enumerate(chain):
+            if idx >= len(values):
+                value = float(joint.current_value)
+            else:
+                value = float(values[idx])
+
+            span = float(joint.max_limit - joint.min_limit)
+            if span <= 1e-9:
+                continue
+
+            center = 0.5 * (float(joint.min_limit) + float(joint.max_limit))
+            normalized = abs(value - center) / span
+
+            # Prefer staying near the neutral midpoint instead of folding the arm
+            # into extreme limits. Heavier penalty for very large excursions.
+            penalty += 0.35 * normalized
+            if normalized > 0.65:
+                penalty += 0.20 * normalized
+
+            if (joint.joint_type or "revolute").lower() == "revolute":
+                # Slightly discourage near-limit, highly folded wrist/elbow poses.
+                if abs(value) > 0.75 * max(abs(joint.min_limit), abs(joint.max_limit)):
+                    penalty += 0.10 * normalized
+
+        return float(penalty)
+
     def _compute_pose_jacobian(self, chain, tcp_link, use_tcp=True):
         pose = self.get_tcp_world_pose(tcp_link) if use_tcp else self.get_flange_world_pose(tcp_link)
         point_world = pose[:3, 3]
@@ -981,10 +1025,12 @@ class Robot:
         err6 = pose_error(target_tcp_pose, self.get_tcp_world_pose(tcp_link))
         motion_stats = self._joint_motion_stats(chain, solved, reference_vector, joint_span)
         motion_score = motion_stats["normalized_l2"]
+        posture_penalty = self._posture_penalty(chain, solved)
         score = float(
             np.linalg.norm(err6[:3])
             + (orientation_weight * np.linalg.norm(err6[3:]))
             + (joint_change_weight * motion_stats["normalized_total_abs"])
+            + (0.10 * posture_penalty)
         )
         return {
             "vector": solved,
@@ -1100,7 +1146,7 @@ class Robot:
         target_tcp_pose,
         tcp_link,
         max_iters=300,
-        position_tolerance=0.3,
+        position_tolerance=0.1,
         orientation_tolerance=0.05,
         orientation_weight=0.35,
         joint_change_weight=0.12,
@@ -1119,7 +1165,7 @@ class Robot:
         reference_vector = self._current_joint_vector(chain)
         joint_span = np.maximum(maxs - mins, 1.0)
         best_vector = reference_vector.copy()
-        best_rank = (1, np.inf, np.inf, np.inf, np.inf)
+        best_rank = (1, np.inf, np.inf, np.inf, np.inf, np.inf)
         weights = np.array([1.0, 1.0, 1.0, orientation_weight, orientation_weight, orientation_weight], dtype=float)
         best_err6 = None
         best_motion_stats = self._joint_motion_stats(chain, best_vector, reference_vector, joint_span)
@@ -1129,12 +1175,14 @@ class Robot:
             pos_err = float(np.linalg.norm(err6[:3]))
             rot_err = float(np.linalg.norm(err6[3:]))
             motion_stats = self._joint_motion_stats(chain, vector, reference_vector, joint_span)
+            posture_penalty = self._posture_penalty(chain, vector)
             orientation_ok = orientation_weight <= 1e-9 or rot_err <= orientation_tolerance
             reachable = pos_err <= position_tolerance and orientation_ok
             if reachable:
                 return (
                     0,
                     motion_stats["total_abs"],
+                    posture_penalty,
                     motion_stats["max_abs"],
                     pos_err,
                     rot_err,
@@ -1144,6 +1192,7 @@ class Robot:
                 pos_err,
                 rot_err,
                 motion_stats["total_abs"],
+                posture_penalty,
                 motion_stats["max_abs"],
             ), motion_stats
 
@@ -1392,7 +1441,149 @@ class Robot:
             },
         }
 
-    def compute_workspace(self, tcp_link, max_samples=1200):
+    def _are_links_directly_connected(self, link_a, link_b):
+        """Return True for links that share the same mechanical joint."""
+        joint_a = getattr(link_a, "parent_joint", None)
+        joint_b = getattr(link_b, "parent_joint", None)
+        if joint_a is not None and joint_a.parent_link is link_b:
+            return True
+        if joint_b is not None and joint_b.parent_link is link_a:
+            return True
+        return False
+
+    def _collect_descendant_links(self, root_link):
+        links = []
+        stack = list(getattr(root_link, "child_joints", []) or [])
+        while stack:
+            joint = stack.pop()
+            child = getattr(joint, "child_link", None)
+            if child is None or child in links:
+                continue
+            links.append(child)
+            stack.extend(list(getattr(child, "child_joints", []) or []))
+        return links
+
+    def _gripper_contact_links(self, tcp_link=None):
+        """Links that may internally touch as part of the gripper/end-effector."""
+        allowed = set()
+        if tcp_link is not None:
+            allowed.add(tcp_link)
+        for joint in self.joints.values():
+            if getattr(joint, "is_gripper", False):
+                if joint.child_link is not None:
+                    allowed.add(joint.child_link)
+                    allowed.update(self._collect_descendant_links(joint.child_link))
+                if joint.parent_link is not None:
+                    allowed.add(joint.parent_link)
+        return allowed
+
+    def _is_allowed_self_contact_pair(
+        self,
+        link_a,
+        link_b,
+        tcp_link=None,
+        gripper_links=None,
+        allow_direct_joint_contact=False,
+    ):
+        """Allow internal gripper contact; optionally allow direct mechanical joint contact."""
+        if allow_direct_joint_contact and self._are_links_directly_connected(link_a, link_b):
+            return True
+        gripper_links = gripper_links if gripper_links is not None else self._gripper_contact_links(tcp_link=tcp_link)
+        return link_a in gripper_links and link_b in gripper_links
+
+    def _link_oriented_box(self, link):
+        """Build an oriented bounding box from a link mesh and world transform."""
+        mesh = getattr(link, "mesh", None)
+        if mesh is None or not hasattr(mesh, "bounds"):
+            return None
+
+        bounds = np.array(mesh.bounds, dtype=float)
+        if bounds.shape == (6,):
+            bounds = np.array(
+                [
+                    [bounds[0], bounds[2], bounds[4]],
+                    [bounds[1], bounds[3], bounds[5]],
+                ],
+                dtype=float,
+            )
+        elif bounds.shape != (2, 3):
+            return None
+
+        local_center = (bounds[0] + bounds[1]) * 0.5
+        local_half = np.maximum((bounds[1] - bounds[0]) * 0.5, 1e-6)
+        transform = np.array(link.t_world, dtype=float)
+        world_center = (transform @ np.append(local_center, 1.0))[:3]
+
+        axes = []
+        half_lengths = []
+        for axis_idx in range(3):
+            world_axis = transform[:3, axis_idx]
+            axis_scale = float(np.linalg.norm(world_axis))
+            if axis_scale <= 1e-9:
+                return None
+            axes.append(world_axis / axis_scale)
+            half_lengths.append(float(local_half[axis_idx] * axis_scale))
+
+        return {
+            "center": world_center,
+            "axes": np.array(axes, dtype=float),
+            "half": np.array(half_lengths, dtype=float),
+        }
+
+    def _oriented_boxes_overlap(self, box_a, box_b, padding=0.0):
+        """Own SAT-based oriented-box collision check for component self-touch."""
+        axes_a = box_a["axes"]
+        axes_b = box_b["axes"]
+        half_a = box_a["half"] + float(padding)
+        half_b = box_b["half"] + float(padding)
+        center_delta = box_b["center"] - box_a["center"]
+
+        test_axes = [*axes_a, *axes_b]
+        for axis_a in axes_a:
+            for axis_b in axes_b:
+                cross_axis = np.cross(axis_a, axis_b)
+                norm = np.linalg.norm(cross_axis)
+                if norm > 1e-9:
+                    test_axes.append(cross_axis / norm)
+
+        for axis in test_axes:
+            distance = abs(float(np.dot(center_delta, axis)))
+            radius_a = sum(half_a[i] * abs(float(np.dot(axes_a[i], axis))) for i in range(3))
+            radius_b = sum(half_b[i] * abs(float(np.dot(axes_b[i], axis))) for i in range(3))
+            if distance > radius_a + radius_b:
+                return False
+        return True
+
+    def has_self_collision(self, links=None, tcp_link=None, allow_direct_joint_contact=False):
+        """Detect self-touching with the app's own oriented-box component logic."""
+        links = list(links or self.links.values())
+        links = [
+            link for link in links
+            if getattr(link, "mesh", None) is not None and not getattr(link, "is_sim_obj", False)
+        ]
+        if len(links) < 2:
+            return False
+
+        gripper_links = self._gripper_contact_links(tcp_link=tcp_link)
+        for idx, link_a in enumerate(links[:-1]):
+            for link_b in links[idx + 1:]:
+                if self._is_allowed_self_contact_pair(
+                    link_a,
+                    link_b,
+                    tcp_link=tcp_link,
+                    gripper_links=gripper_links,
+                    allow_direct_joint_contact=allow_direct_joint_contact,
+                ):
+                    continue
+                box_a = self._link_oriented_box(link_a)
+                box_b = self._link_oriented_box(link_b)
+                if box_a is None or box_b is None:
+                    continue
+                if self._oriented_boxes_overlap(box_a, box_b, padding=0.0):
+                    return True
+        return False
+
+    def compute_workspace(self, tcp_link, max_samples=1200, progress_callback=None, exclude_self_collision=True):
         if tcp_link is None:
             return {"ok": False, "reason": "missing_tcp"}
 
@@ -1412,31 +1603,56 @@ class Robot:
             if abs(joint.max_limit - joint.min_limit) < 1e-9:
                 sample_axes.append(np.array([joint.min_limit], dtype=float))
             else:
-                sample_axes.append(np.linspace(joint.min_limit, joint.max_limit, num=samples_per_joint, dtype=float))
+                axis = np.linspace(joint.min_limit, joint.max_limit, num=samples_per_joint, dtype=float)
+                axis = np.unique(np.append(axis, float(joint.current_value)))
+                sample_axes.append(axis)
 
         old_values = {name: joint.current_value for name, joint in self.joints.items()}
         points = []
         configs = []
         effort_scores = []
         visited = 0
+        rejected_self_collision = 0
+        collision_radii = []
         root_pos = chain[0].parent_link.t_world[:3, 3].copy()
+        robot_links = [
+            link for link in self.links.values()
+            if not getattr(link, "is_sim_obj", False)
+        ]
 
         try:
             for config in product(*sample_axes):
+                if progress_callback and visited % 10 == 0:
+                    progress_callback(visited)
+                    
                 config_arr = np.array(config, dtype=float)
                 self._apply_joint_vector(chain, config_arr)
+                visited += 1
+                if exclude_self_collision and self.has_self_collision(
+                    robot_links,
+                    tcp_link=tcp_link,
+                    allow_direct_joint_contact=True,
+                ):
+                    rejected_self_collision += 1
+                    tcp_pos = self.get_tcp_world_pose(tcp_link)[:3, 3].copy()
+                    collision_radii.append(float(np.linalg.norm(tcp_pos - root_pos)))
+                    continue
                 points.append(self.get_tcp_world_pose(tcp_link)[:3, 3].copy())
                 configs.append(config_arr.copy())
                 loads = self.compute_static_joint_loads(joint_names=[joint.name for joint in chain])
                 effort_scores.append(float(sum(item["resultant_torque_ncm"] for item in loads)))
-                visited += 1
         finally:
             for name, value in old_values.items():
                 self.joints[name].current_value = value
             self.update_kinematics()
 
         if not points:
-            return {"ok": False, "reason": "no_points"}
+            return {
+                "ok": False,
+                "reason": "all_self_collision" if rejected_self_collision else "no_points",
+                "sample_count": int(visited),
+                "rejected_self_collision": int(rejected_self_collision),
+            }
 
         points = np.array(points, dtype=float)
         configs = np.array(configs, dtype=float)
@@ -1444,24 +1660,40 @@ class Robot:
         bounds_min = points.min(axis=0)
         bounds_max = points.max(axis=0)
         center = points.mean(axis=0)
+        workspace_sphere_center = (bounds_min + bounds_max) * 0.5
+        workspace_sphere_radius = float(
+            np.max(np.linalg.norm(points - workspace_sphere_center, axis=1))
+        )
         radii = np.linalg.norm(points - root_pos, axis=1)
         radial_xy = np.linalg.norm(points[:, :2] - root_pos[:2], axis=1)
+        safe_sphere_radius = float(radii.max())
+        if collision_radii:
+            first_collision_radius = max(0.0, float(min(collision_radii)))
+            safe_sphere_radius = min(safe_sphere_radius, first_collision_radius * 0.95)
 
         report = {
             "ok": True,
             "tcp_link": tcp_link.name,
             "joint_count": dims,
             "sample_axes": [axis.copy() for axis in sample_axes],
-            "sample_count": int(visited),
+            "sample_count": int(len(points)),
+            "total_sample_count": int(visited),
+            "rejected_self_collision": int(rejected_self_collision),
             "points": points,
             "joint_configs": configs,
             "joint_effort_scores": effort_scores,
             "bounds_min": bounds_min,
             "bounds_max": bounds_max,
             "center": center,
+            "workspace_sphere_center": workspace_sphere_center,
+            "workspace_sphere_radius": workspace_sphere_radius,
+            "max_reach_sphere_center": root_pos,
+            "max_reach_sphere_radius": float(radii.max()),
             "base_position": root_pos,
             "radius_min": float(radii.min()),
             "radius_max": float(radii.max()),
+            "safe_sphere_radius": safe_sphere_radius,
+            "collision_policy": "strict_rigid_parts_except_gripper",
             "xy_radius_min": float(radial_xy.min()),
             "xy_radius_max": float(radial_xy.max()),
             "z_min": float(bounds_min[2]),
@@ -1479,6 +1711,8 @@ class Robot:
                 report["sample_spacing"] = float(np.median(np.min(dist_mat, axis=1)))
         else:
             report["sample_spacing"] = 0.0
-        report["directional_reach"] = self.compute_directional_reach(report)
+        report["directional_reach"] = self.compute_directional_reach(
+            report, azimuth_steps=36, elevation_steps=19, cone_half_angle_deg=15.0
+        )
         self.workspace_report = report
         return report

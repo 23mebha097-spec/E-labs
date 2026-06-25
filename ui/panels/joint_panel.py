@@ -608,6 +608,7 @@ class JointPanel(QtWidgets.QWidget):
         
         # 1. Remove from Robot Model Core
         self.mw.robot.remove_joint(joint_name)
+        self.mw.canvas.fixed_actors.discard(child_name)
         
         # 2. Reset world transform to the offset (0 rotation position)
         child_link = self.mw.robot.links[child_name]
@@ -1210,6 +1211,7 @@ class JointPanel(QtWidgets.QWidget):
         # Math: Child_Offset = inv(Parent_World) * Original_Aligned_Child_World
         # IMPORTANT: Use original_child_transform to ensure 0 deg = perfectly aligned position
         child_link.t_offset = t_parent_inv @ self.original_child_transform
+        self.mw.canvas.fixed_actors.add(self.child_object)
         
         # Set Joint Limits
         joint.min_limit = min_limit
@@ -1241,7 +1243,7 @@ class JointPanel(QtWidgets.QWidget):
         pivot_cm = pivot_local / ratio
         
         self.mw.log(f"Joint confirmed and added to Robot model (ID: {joint_id})")
-        self.mw.log(f"  Pivot (CM):  X: {pivot_cm[0]:.3f}, Y: {pivot_cm[1]:.3f}, Z: {pivot_cm[2]:.3f}")
+        self.mw.log(f"  Pivot (CM):  X: {pivot_cm[0]:.1f}, Y: {pivot_cm[1]:.1f}, Z: {pivot_cm[2]:.1f}")
         
         # --- 3. AUTO-APPEND TO CODE EDITOR ---
         if hasattr(self.mw, 'experiment_tab') and hasattr(self.mw.experiment_tab, 'program_tab'):
@@ -1344,6 +1346,19 @@ class JointPanel(QtWidgets.QWidget):
                 
             # 6. Push updated transforms to the 3D viewer
             self.mw.canvas.update_transforms(self.mw.robot)
+            
+            # --- COLLISION CHECK ---
+            # Determine TCP link to exclude valid internal gripper collisions
+            tcp_link = None
+            if hasattr(self.mw, '_get_preferred_tcp_link'):
+                tcp_link = self.mw._get_preferred_tcp_link()
+            
+            # If the movement caused the robot to touch itself, do not auto-reset.
+            # Allow direct joint contact between adjacent links as a normal mechanism.
+            if self.mw.robot.has_self_collision(tcp_link=tcp_link, allow_direct_joint_contact=True):
+                self.mw.log("⚠️ CRITICAL: Self-collision detected! Movement stopped; no auto-homing.")
+                return # Stop processing further updates for this frame
+            # -----------------------
             
             # 6b. Update Live Point (LP) coordinates UI
             if hasattr(self.mw, 'update_live_ui'):

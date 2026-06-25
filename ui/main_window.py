@@ -25,6 +25,425 @@ class TypeOnlySpinBox(QtWidgets.QSpinBox):
     def stepBy(self, steps): pass
     def wheelEvent(self, event): event.ignore()
 
+from core.path_planner import WorkspacePlan
+from core.import_units import get_engine_units_per_cm
+
+class WorkspaceCalculatorThread(QtCore.QThread):
+    finished = QtCore.pyqtSignal(dict)
+    
+    def __init__(self, robot, tcp_link_name, plane_mode="inclined", workspace_points=None, parent=None):
+        super().__init__(parent)
+        self.robot = robot
+        self.tcp_link_name = tcp_link_name
+        self.plane_mode = str(plane_mode or "inclined")
+        self.workspace_points = np.array(workspace_points, dtype=float) if workspace_points is not None else None
+        self.units_per_cm = get_engine_units_per_cm() or 1.0
+
+    def _get_home_plane_point_cm(self, tcp_link_obj, plane_rotation):
+        old_values = {name: joint.current_value for name, joint in self.robot.joints.items()}
+        try:
+            for joint in self.robot.joints.values():
+                zero_home = float(np.clip(0.0, joint.min_limit, joint.max_limit))
+                joint.current_value = zero_home
+            self.robot.update_kinematics()
+
+            base_world = np.array(self.robot.base_link.t_world, dtype=float)
+            tcp_world = self.robot.get_tcp_world_pose(tcp_link_obj)[:3, 3] / self.units_per_cm
+            inv_base = np.linalg.inv(base_world)
+            tcp_world_h = np.append(tcp_world * self.units_per_cm, 1.0)
+            tcp_base = (inv_base @ tcp_world_h)[:3] / self.units_per_cm
+            return tcp_base @ plane_rotation
+        finally:
+            for name, value in old_values.items():
+                self.robot.joints[name].current_value = value
+            self.robot.update_kinematics()
+
+    def _board_sample_points(self, width_cm, height_cm, spacing_cm=8.0):
+        nx = max(3, min(7, int(np.ceil(width_cm / spacing_cm)) + 1))
+        ny = max(3, min(7, int(np.ceil(height_cm / spacing_cm)) + 1))
+        xs = np.linspace(0.0, float(width_cm), nx)
+        ys = np.linspace(0.0, float(height_cm), ny)
+        return [np.array([x, y, 0.0], dtype=float) for y in ys for x in xs]
+
+    def _board_point_to_world(self, origin_base_cm, local_pt_cm, plane_rotation, base_world_cm):
+        point_base_cm = np.array(origin_base_cm, dtype=float) + plane_rotation @ np.array(local_pt_cm, dtype=float)
+        point_world_cm = (base_world_cm @ np.append(point_base_cm, 1.0))[:3]
+        return point_base_cm, point_world_cm * self.units_per_cm
+
+    def _validate_board_reachability(
+        self,
+        tcp_link_obj,
+        origin_base_cm,
+        width_cm,
+        height_cm,
+        plane_rotation,
+        base_world_cm,
+    ):
+        old_values = {name: joint.current_value for name, joint in self.robot.joints.items()}
+        target_pose = self.robot.get_tcp_world_pose(tcp_link_obj).copy()
+        samples = self._board_sample_points(width_cm, height_cm)
+        checked = 0
+        try:
+            for local_pt in samples:
+                if self.isInterruptionRequested():
+                    return False, checked, "cancelled"
+
+                point_base_cm, point_world = self._board_point_to_world(
+                    origin_base_cm,
+                    local_pt,
+                    plane_rotation,
+                    base_world_cm,
+                )
+                if np.any(point_base_cm < -1e-6):
+                    return False, checked, "outside_positive_octant"
+
+                target_pose[:3, 3] = point_world
+                success, _ = self.robot.inverse_kinematics_pose(
+                    target_pose,
+                    tcp_link_obj,
+                    max_iters=90,
+                    position_tolerance=max(0.8 * self.units_per_cm, 0.4),
+                    orientation_tolerance=1e6,
+                    orientation_weight=0.0,
+                    joint_change_weight=0.04,
+                )
+                checked += 1
+                if not success:
+                    return False, checked, "ik_failed"
+            return True, checked, "ok"
+        finally:
+            for name, value in old_values.items():
+                self.robot.joints[name].current_value = value
+            self.robot.update_kinematics()
+
+    def _candidate_origins(self, plane_rotation, base_world, base_world_cm, tcp_link_obj, width_cm, workspace_points_base_cm=None):
+        origins = [
+            np.array([2.0, 0.0, 0.0], dtype=float),
+            np.array([max(2.0, width_cm * 0.1), 0.0, 0.0], dtype=float),
+        ]
+
+        try:
+            tcp_world = self.robot.get_tcp_world_pose(tcp_link_obj)[:3, 3] / self.units_per_cm
+            inv_base = np.linalg.inv(base_world)
+            tcp_base = (inv_base @ np.append(tcp_world * self.units_per_cm, 1.0))[:3] / self.units_per_cm
+            origins.append(np.maximum(tcp_base - plane_rotation @ np.array([width_cm * 0.5, 2.0, 0.0]), 0.0))
+        except Exception:
+            pass
+
+        if workspace_points_base_cm is not None and len(workspace_points_base_cm):
+            positive_pts = workspace_points_base_cm[np.all(workspace_points_base_cm >= -1e-6, axis=1)]
+            if len(positive_pts):
+                norms = np.linalg.norm(positive_pts, axis=1)
+                for idx in np.argsort(norms)[:8]:
+                    pt = positive_pts[idx]
+                    origins.append(np.maximum(pt - plane_rotation @ np.array([width_cm * 0.25, 0.0, 0.0]), 0.0))
+
+        unique = []
+        for origin in origins:
+            origin = np.maximum(np.array(origin, dtype=float), 0.0)
+            if not any(np.linalg.norm(origin - existing) < 1.0 for existing in unique):
+                unique.append(origin)
+        return sorted(unique, key=lambda p: float(np.linalg.norm(p)))
+
+    def _score_board_candidate(self, origin_base_cm, width_cm, height_cm, plane_rotation, reach_cm):
+        center_base = np.array(origin_base_cm, dtype=float) + plane_rotation @ np.array(
+            [width_cm / 2.0, height_cm / 2.0, 0.0],
+            dtype=float,
+        )
+        center_distance = float(np.linalg.norm(center_base))
+        ideal_distance = max(8.0, 0.45 * reach_cm)
+        distance_score = abs(center_distance - ideal_distance) / max(ideal_distance, 1.0)
+        too_close_penalty = max(0.0, (0.18 * reach_cm - center_distance) / max(0.18 * reach_cm, 1.0))
+        too_far_penalty = max(0.0, (center_distance - 0.82 * reach_cm) / max(0.82 * reach_cm, 1.0))
+        area_score = (width_cm * height_cm) / max(reach_cm * reach_cm, 1.0)
+        aspect_penalty = abs((width_cm / max(height_cm, 1e-6)) - 1.35) * 0.18
+        positive_penalty = float(np.count_nonzero(np.array(origin_base_cm) < -1e-6)) * 10.0
+        return (
+            area_score * 2.0
+            - distance_score
+            - (1.5 * too_close_penalty)
+            - (1.2 * too_far_penalty)
+            - aspect_penalty
+            - positive_penalty
+        )
+
+    def _candidate_boards(
+        self,
+        plane_rotation,
+        base_world,
+        base_world_cm,
+        tcp_link_obj,
+        reach_cm,
+        base_width,
+        base_height,
+        min_board_cm,
+        workspace_points_base_cm=None,
+    ):
+        boards = []
+        width_cap = max(min_board_cm, min(50.0, 0.55 * reach_cm))
+        height_cap = max(min_board_cm, min(38.0, 0.42 * reach_cm))
+        width_seed = max(min_board_cm, min(float(base_width), width_cap))
+        height_seed = max(min_board_cm, min(float(base_height), height_cap))
+
+        sizes = []
+        for scale in (1.0, 0.88, 0.75, 0.62, 0.5, 0.38, 0.28, 0.2, 0.14):
+            width_cm = max(min_board_cm, width_seed * scale)
+            height_cm = max(min_board_cm, height_seed * scale)
+            if width_cm < min_board_cm + 0.2 or height_cm < min_board_cm + 0.2:
+                continue
+            if not any(abs(width_cm - w) < 0.5 and abs(height_cm - h) < 0.5 for w, h in sizes):
+                sizes.append((width_cm, height_cm))
+
+        try:
+            tcp_world = self.robot.get_tcp_world_pose(tcp_link_obj)[:3, 3] / self.units_per_cm
+            inv_base = np.linalg.inv(base_world)
+            tcp_base = (inv_base @ np.append(tcp_world * self.units_per_cm, 1.0))[:3] / self.units_per_cm
+            tcp_plane = tcp_base @ plane_rotation
+        except Exception:
+            tcp_plane = np.array([0.35 * reach_cm, 0.0, 0.0], dtype=float)
+
+        center_hints = [
+            np.array([max(0.18 * reach_cm, tcp_plane[0]), max(0.12 * reach_cm, tcp_plane[1] + 0.15 * reach_cm), tcp_plane[2]], dtype=float),
+            np.array([0.38 * reach_cm, 0.18 * reach_cm, tcp_plane[2]], dtype=float),
+            np.array([0.48 * reach_cm, 0.16 * reach_cm, tcp_plane[2]], dtype=float),
+            np.array([max(4.0, tcp_plane[0]), max(2.0, tcp_plane[1] + 4.0), tcp_plane[2]], dtype=float),
+        ]
+
+        if workspace_points_base_cm is not None and len(workspace_points_base_cm):
+            pts_plane = workspace_points_base_cm @ plane_rotation
+            mask = np.all(workspace_points_base_cm >= -1e-6, axis=1)
+            if np.any(mask):
+                reachable_xy = pts_plane[mask][:, :2]
+                for pct_x, pct_y in ((50, 50), (55, 45), (45, 55), (60, 50), (50, 60)):
+                    center_hints.append(
+                        np.array([
+                            float(np.percentile(reachable_xy[:, 0], pct_x)),
+                            float(np.percentile(reachable_xy[:, 1], pct_y)),
+                            tcp_plane[2],
+                        ], dtype=float)
+                    )
+
+        for width_cm, height_cm in sizes:
+            for center_plane in center_hints:
+                origin_plane = np.array([
+                    center_plane[0] - (width_cm / 2.0),
+                    center_plane[1] - (height_cm / 2.0),
+                    center_plane[2],
+                ], dtype=float)
+                origin_base = plane_rotation @ origin_plane
+                if np.any(origin_base < -1e-6):
+                    origin_base = np.maximum(origin_base, 0.0)
+                score = self._score_board_candidate(origin_base, width_cm, height_cm, plane_rotation, reach_cm)
+                boards.append((score, origin_base, width_cm, height_cm))
+
+            for origin in self._candidate_origins(
+                plane_rotation,
+                base_world,
+                base_world_cm,
+                tcp_link_obj,
+                width_cm,
+                workspace_points_base_cm=workspace_points_base_cm,
+            ):
+                score = self._score_board_candidate(origin, width_cm, height_cm, plane_rotation, reach_cm)
+                boards.append((score, origin, width_cm, height_cm))
+
+        unique = []
+        for score, origin, width_cm, height_cm in sorted(boards, key=lambda item: item[0], reverse=True):
+            if any(
+                abs(width_cm - w) < 0.5
+                and abs(height_cm - h) < 0.5
+                and np.linalg.norm(origin - existing_origin) < 1.0
+                for _, existing_origin, w, h in unique
+            ):
+                continue
+            unique.append((score, origin, width_cm, height_cm))
+            if len(unique) >= 36:
+                break
+        return unique
+        
+    def run(self):
+        try:
+            if not self.robot or not self.robot.base_link:
+                self.finished.emit({"error": "No robot or base link"})
+                return
+                
+            tcp_link_obj = None
+            if self.tcp_link_name and self.tcp_link_name in self.robot.links:
+                tcp_link_obj = self.robot.links[self.tcp_link_name]
+            else:
+                self.finished.emit({"error": "Invalid TCP link"})
+                return
+                
+            reach = sum(np.linalg.norm(j.origin) for j in self.robot.joints.values())
+            if reach < 10.0:
+                reach = 30.0 * self.units_per_cm
+            reach_cm = reach / self.units_per_cm
+
+            base_world = np.array(self.robot.base_link.t_world, dtype=float)
+            base_world_cm = base_world.copy()
+            base_world_cm[:3, 3] = base_world_cm[:3, 3] / self.units_per_cm
+            seed_plan = WorkspacePlan(origin=np.zeros(3), plane_mode=self.plane_mode)
+            plane_rotation = seed_plan.t_workspace_base[:3, :3]
+            home_plane_pt = self._get_home_plane_point_cm(tcp_link_obj, plane_rotation)
+
+            best_center = None
+            best_origin = None
+            best_size = (
+                max(18.0, min(42.0, 0.35 * reach_cm)),
+                max(14.0, min(30.0, 0.25 * reach_cm)),
+            )
+            best_validation_count = 0
+            source = "kinematic_estimate"
+            workspace_points_base_cm = None
+
+            if self.workspace_points is not None and len(self.workspace_points) >= 8:
+                inv_base = np.linalg.inv(base_world)
+                pts_h = np.hstack([self.workspace_points, np.ones((len(self.workspace_points), 1))])
+                workspace_points_base_cm = (pts_h @ inv_base.T)[:, :3] / self.units_per_cm
+                pts_plane = workspace_points_base_cm @ plane_rotation
+
+                slice_pts = None
+                for normal_tol_cm in (2.0, 3.5, 5.0, 7.5, 10.0):
+                    candidate = pts_plane[
+                        np.abs(pts_plane[:, 2] - home_plane_pt[2]) <= normal_tol_cm
+                    ]
+                    if len(candidate) >= 12:
+                        slice_pts = candidate
+                        break
+                if slice_pts is None:
+                    nearest = np.argsort(np.abs(pts_plane[:, 2] - home_plane_pt[2]))
+                    take_n = min(len(nearest), 32)
+                    slice_pts = pts_plane[nearest[:take_n]]
+
+                q_low = np.percentile(slice_pts[:, :2], 5, axis=0)
+                q_high = np.percentile(slice_pts[:, :2], 95, axis=0)
+                x_offsets = slice_pts[:, 0] - home_plane_pt[0]
+                y_offsets = slice_pts[:, 1] - home_plane_pt[1]
+
+                left_reach = max(6.0, float(np.percentile(np.clip(-x_offsets, 0.0, None), 85)))
+                right_reach = max(6.0, float(np.percentile(np.clip(x_offsets, 0.0, None), 85)))
+                upward_reach = max(10.0, float(np.percentile(np.clip(y_offsets, 0.0, None), 88)))
+                bottom_margin_cm = 2.5
+
+                board_w = float(max(14.0, left_reach + right_reach))
+                board_h = float(max(14.0, upward_reach + bottom_margin_cm))
+                center_plane = np.array([
+                    home_plane_pt[0] + (right_reach - left_reach) / 2.0,
+                    home_plane_pt[1] + (board_h / 2.0) - bottom_margin_cm,
+                    home_plane_pt[2],
+                ], dtype=float)
+
+                half_w = board_w / 2.0
+                half_h = board_h / 2.0
+                best_center = plane_rotation @ center_plane
+                best_size = (board_w, board_h)
+                origin_plane = np.array([
+                    center_plane[0] - half_w,
+                    center_plane[1] - half_h,
+                    center_plane[2],
+                ], dtype=float)
+                best_origin = np.maximum(plane_rotation @ origin_plane, 0.0)
+                inside = (
+                    (np.abs(slice_pts[:, 0] - center_plane[0]) <= half_w)
+                    & (np.abs(slice_pts[:, 1] - center_plane[1]) <= half_h)
+                )
+                best_validation_count = int(np.count_nonzero(inside))
+                source = "home_anchored_plane"
+
+            if best_center is None:
+                best_center = plane_rotation @ np.array([0.55 * reach_cm, 0.0, home_plane_pt[2]], dtype=float)
+                best_origin = np.array([max(2.0, 0.05 * reach_cm), 0.0, 0.0], dtype=float)
+            elif best_origin is None:
+                best_origin = np.maximum(
+                    best_center - np.array([best_size[0] / 2.0, 0.0, 0.0], dtype=float),
+                    0.0,
+                )
+
+            min_board_cm = max(2.0, min(6.0, 0.08 * reach_cm))
+            board_candidates = self._candidate_boards(
+                plane_rotation,
+                base_world,
+                base_world_cm,
+                tcp_link_obj,
+                reach_cm,
+                best_size[0],
+                best_size[1],
+                min_board_cm,
+                workspace_points_base_cm=workspace_points_base_cm,
+            )
+
+            reachable_board = None
+            failed_reason = "not_checked"
+            checked_total = 0
+            attempted_boards = 0
+            best_candidate_score = None
+            for score, origin, width_cm, height_cm in board_candidates:
+                if self.isInterruptionRequested():
+                    self.finished.emit({"cancelled": True})
+                    return
+
+                ok, checked, reason = self._validate_board_reachability(
+                    tcp_link_obj,
+                    origin,
+                    width_cm,
+                    height_cm,
+                    plane_rotation,
+                    base_world_cm,
+                )
+                checked_total += checked
+                attempted_boards += 1
+                failed_reason = reason
+                if reason == "cancelled" or self.isInterruptionRequested():
+                    self.finished.emit({"cancelled": True})
+                    return
+                if ok:
+                    reachable_board = (origin, width_cm, height_cm, checked)
+                    best_candidate_score = score
+                    break
+
+            if reachable_board is None:
+                self.finished.emit({
+                    "error": (
+                        "No chalkboard plane found where every sampled point is reachable "
+                        f"(last check: {failed_reason}, boards tried: {attempted_boards}, "
+                        f"samples checked: {checked_total}, candidates: {len(board_candidates)}, "
+                        f"smallest board: {min_board_cm:.1f} cm)."
+                    )
+                })
+                return
+
+            best_origin, board_w, board_h, verified_samples = reachable_board
+            best_size = (board_w, board_h)
+            best_center = best_origin + plane_rotation @ np.array([board_w / 2.0, board_h / 2.0, 0.0], dtype=float)
+            best_validation_count = int(verified_samples)
+            source = f"{source}_ik_verified"
+                    
+            if best_center is not None:
+                grid_size_cm = 10.0
+                cells_x = max(1, int(np.floor(best_size[0] / grid_size_cm)))
+                cells_y = max(1, int(np.floor(best_size[1] / grid_size_cm)))
+                self.finished.emit({
+                    "best_center": best_center.tolist(),
+                    "best_origin": best_origin.tolist(),
+                    "best_size": best_size,
+                    "validation_count": best_validation_count,
+                    "plane_mode": self.plane_mode,
+                    "reach_cm": reach_cm,
+                    "source": source,
+                    "grid_size_cm": grid_size_cm,
+                    "cells_x": cells_x,
+                    "cells_y": cells_y,
+                    "cell_count": int(cells_x * cells_y),
+                    "home_plane_point": home_plane_pt.tolist(),
+                    "attempted_boards": attempted_boards,
+                    "min_board_cm": min_board_cm,
+                    "board_score": best_candidate_score,
+                })
+            else:
+                self.finished.emit({"error": "No reachable workspace found"})
+        except Exception as e:
+            self.finished.emit({"error": str(e)})
+
 
 class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixin):
     log_signal = QtCore.pyqtSignal(str)
@@ -41,7 +460,15 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             "last_stl_unit": "mm",
             "last_up_axis": "preserve",
         }
+        self.workspace_calc_thread = None
+        self._workspace_calc_pending = False
+        self._closing = False
+        self.workspace_plane_mode = "inclined"
+        self.last_workspace_report = None
         self.last_project_dir = os.getcwd()
+        self.robot_sessions = [{"title": "ToRoTrOn", "project_file_path": None}]
+        self.current_session_index = 0
+        self._restoring_robot_session = False
         self._init_navigation_mixin()
         self.init_ui()
         self.apply_styles()
@@ -52,6 +479,310 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         # Center the window and fix geometry warnings
         self.center_on_screen()
+
+    def _current_program_code(self):
+        try:
+            return self.experiment_tab.program_tab.code_edit.toPlainText()
+        except Exception:
+            return ""
+
+    def _set_program_code(self, code):
+        try:
+            self.experiment_tab.program_tab.code_edit.setPlainText(code or "")
+        except Exception:
+            pass
+
+    def _capture_current_robot_session(self):
+        """Store the currently visible robot assembly into its active session tab."""
+        if getattr(self, "_restoring_robot_session", False):
+            return
+        if not hasattr(self, "robot_sessions") or self.current_session_index < 0:
+            return
+        if self.current_session_index >= len(self.robot_sessions):
+            return
+
+        session = self.robot_sessions[self.current_session_index]
+        session["robot"] = self.robot
+        session["alignment_cache"] = dict(getattr(self, "alignment_cache", {}))
+        session["current_speed"] = getattr(self, "current_speed", 50)
+        session["import_preferences"] = dict(getattr(self, "import_preferences", {}))
+        session["program_code"] = self._current_program_code()
+        session["home_tcp_coords"] = getattr(
+            self,
+            "home_tcp_coords",
+            (
+                float(self.home_x.value()) if hasattr(self, "home_x") else 0.0,
+                float(self.home_y.value()) if hasattr(self, "home_y") else 0.0,
+                float(self.home_z.value()) if hasattr(self, "home_z") else 0.0,
+            ),
+        )
+        if hasattr(self, "joint_tab"):
+            import copy
+            session["joint_panel_joints"] = copy.deepcopy(getattr(self.joint_tab, "joints", {}))
+        if hasattr(self, "align_tab"):
+            session["alignment_point"] = None if getattr(self.align_tab, "alignment_point", None) is None else np.array(self.align_tab.alignment_point).copy()
+            session["alignment_normal"] = None if getattr(self.align_tab, "alignment_normal", None) is None else np.array(self.align_tab.alignment_normal).copy()
+
+    def _clear_visible_robot_scene(self):
+        """Remove visible robot actors and transient assembly overlays before restoring a session."""
+        if hasattr(self.canvas, "clear_highlights"):
+            self.canvas.clear_highlights()
+        for name in list(getattr(self.canvas, "actors", {}).keys()):
+            self.canvas.remove_actor(name)
+        self.canvas.fixed_actors.clear()
+        if hasattr(self.canvas, "clear_joint_ghosts"):
+            self.canvas.clear_joint_ghosts()
+        if hasattr(self.canvas, "clear_cad_drawings"):
+            self.canvas.clear_cad_drawings()
+        if hasattr(self.canvas, "show_workspace_cloud"):
+            self.canvas.show_workspace_cloud(None)
+        if hasattr(self.canvas, "clear_workspace_plane"):
+            self.canvas.clear_workspace_plane()
+
+    def _restore_robot_session(self, index):
+        """Load one robot session into the shared editor, panels, and 3D canvas."""
+        if index < 0 or index >= len(self.robot_sessions):
+            return
+
+        self._restoring_robot_session = True
+        try:
+            session = self.robot_sessions[index]
+            self.robot = session.get("robot") or Robot()
+            session["robot"] = self.robot
+            self.alignment_cache = dict(session.get("alignment_cache", {}))
+            self.current_speed = int(session.get("current_speed", 50))
+            self.import_preferences = dict(session.get("import_preferences", {
+                "last_stl_unit": "mm",
+                "last_up_axis": "preserve",
+            }))
+
+            self._clear_visible_robot_scene()
+            if hasattr(self, "links_list"):
+                self.links_list.clear()
+
+            self.robot.update_kinematics()
+            for name, link in self.robot.links.items():
+                if hasattr(self, "add_link_item"):
+                    self.add_link_item(name)
+                if getattr(link, "mesh", None) is not None:
+                    self.canvas.update_link_mesh(name, link.mesh, link.t_world, color=getattr(link, "color", "lightgray"))
+                if getattr(link, "is_base", False):
+                    self.canvas.fixed_actors.add(name)
+
+            if hasattr(self, "joint_tab"):
+                import copy
+                self.joint_tab.joints = copy.deepcopy(session.get("joint_panel_joints", {}))
+                self.joint_tab.active_joint_control = None
+                self.joint_tab.refresh_joints_history()
+                self.joint_tab.refresh_links()
+            if hasattr(self, "align_tab"):
+                self.align_tab.reset_panel()
+                if session.get("alignment_point") is not None:
+                    self.align_tab.alignment_point = np.array(session["alignment_point"]).copy()
+                if session.get("alignment_normal") is not None:
+                    self.align_tab.alignment_normal = np.array(session["alignment_normal"]).copy()
+            if hasattr(self, "gripper_tab"):
+                self.gripper_tab.refresh_joints()
+            if hasattr(self, "experiment_tab"):
+                self.experiment_tab.refresh_sliders()
+                self.experiment_tab.update_display()
+            self._set_program_code(session.get("program_code", ""))
+
+            home = session.get("home_tcp_coords", (0.0, 0.0, 0.0))
+            self.home_tcp_coords = tuple(float(v) for v in home)
+            if hasattr(self, "home_x"):
+                self.home_x.setValue(self.home_tcp_coords[0])
+                self.home_y.setValue(self.home_tcp_coords[1])
+                self.home_z.setValue(self.home_tcp_coords[2])
+
+            if hasattr(self, "speed_slider"):
+                self.speed_slider.setValue(self.current_speed)
+            if hasattr(self, "speed_spin"):
+                self.speed_spin.setValue(self.current_speed)
+
+            self.update_link_colors()
+            self.canvas.update_transforms(self.robot)
+            self.update_live_ui(render=False)
+            if self.canvas.plotter:
+                self.canvas.plotter.render()
+        finally:
+            self._restoring_robot_session = False
+
+    def add_robot_session(self):
+        """Create a new independent robot assembly tab without clearing existing sessions."""
+        self._capture_current_robot_session()
+        next_number = len(self.robot_sessions) + 1
+        title = f"Robo {next_number}"
+        self.robot_sessions.append({
+            "title": title,
+            "robot": Robot(),
+            "project_file_path": None,
+            "alignment_cache": {},
+            "joint_panel_joints": {},
+            "program_code": "",
+            "current_speed": getattr(self, "current_speed", 50),
+            "home_tcp_coords": (0.0, 0.0, 0.0),
+            "import_preferences": {
+                "last_stl_unit": "mm",
+                "last_up_axis": "preserve",
+            },
+        })
+        if hasattr(self, "session_tab_bar"):
+            self.session_tab_bar.addTab(title)
+            self.session_tab_bar.setCurrentIndex(len(self.robot_sessions) - 1)
+        else:
+            self.current_session_index = len(self.robot_sessions) - 1
+            self._restore_robot_session(self.current_session_index)
+
+        if hasattr(self, "assembly_btn"):
+            self.assembly_btn.setChecked(True)
+            self.toggle_assembly_panel()
+        if hasattr(self, "switch_panel"):
+            self.switch_panel(0)
+        self.log(f"Add Robo: created new assembly tab '{title}'.")
+
+    def _robot_session_tab_at(self, pos):
+        if not hasattr(self, "session_tab_bar"):
+            return -1
+        for idx in range(self.session_tab_bar.count()):
+            if self.session_tab_bar.tabRect(idx).contains(pos):
+                return idx
+        return -1
+
+    def show_robot_session_menu(self, pos):
+        """Show Rename/Delete actions when a robot session tab is right-clicked."""
+        index = self._robot_session_tab_at(pos)
+        if index < 0:
+            return
+
+        menu = QtWidgets.QMenu(self)
+        rename_action = menu.addAction("Rename")
+        delete_action = menu.addAction("Delete")
+        delete_action.setEnabled(len(self.robot_sessions) > 1)
+
+        action = menu.exec_(self.session_tab_bar.mapToGlobal(pos))
+        if action == rename_action:
+            self.rename_robot_session(index)
+        elif action == delete_action:
+            self.delete_robot_session(index)
+
+    def rename_robot_session(self, index):
+        """Rename a robot assembly tab."""
+        if index < 0 or index >= len(self.robot_sessions):
+            return
+        current_name = self.robot_sessions[index].get("title", f"Robo {index + 1}")
+        new_name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Rename Robo",
+            "Robot tab name:",
+            QtWidgets.QLineEdit.Normal,
+            current_name,
+        )
+        new_name = str(new_name).strip()
+        if not ok or not new_name:
+            return
+
+        self.robot_sessions[index]["title"] = new_name
+        if hasattr(self, "session_tab_bar"):
+            self.session_tab_bar.setTabText(index, new_name)
+        self.log(f"Renamed robot assembly tab to: {new_name}")
+
+    def delete_robot_session(self, index):
+        """Delete a robot assembly tab and switch to the nearest remaining tab."""
+        if index < 0 or index >= len(self.robot_sessions):
+            return
+        if len(self.robot_sessions) <= 1:
+            self.show_toast("At least one robot tab is required", "warning")
+            return
+
+        title = self.robot_sessions[index].get("title", f"Robo {index + 1}")
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Delete Robo",
+            f"Delete robot assembly tab '{title}'? This will not delete any saved .trn file.",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No,
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            return
+
+        if index == self.current_session_index:
+            next_index = index - 1 if index == len(self.robot_sessions) - 1 else index
+        else:
+            next_index = self.current_session_index
+            if index < self.current_session_index:
+                next_index -= 1
+
+        self.robot_sessions.pop(index)
+        if hasattr(self, "session_tab_bar"):
+            self._restoring_robot_session = True
+            try:
+                self.session_tab_bar.removeTab(index)
+            finally:
+                self._restoring_robot_session = False
+
+        self.current_session_index = max(0, min(next_index, len(self.robot_sessions) - 1))
+        if hasattr(self, "session_tab_bar"):
+            self.session_tab_bar.setCurrentIndex(self.current_session_index)
+        self._restore_robot_session(self.current_session_index)
+        self.log(f"Deleted robot assembly tab: {title}")
+        if hasattr(self, "show_toast"):
+            self.show_toast("Robot tab deleted", "success")
+    def on_robot_session_changed(self, index):
+        """Persist the previous tab and restore the selected robot assembly tab."""
+        if getattr(self, "_restoring_robot_session", False):
+            return
+        if index < 0 or index == getattr(self, "current_session_index", -1):
+            return
+        self._capture_current_robot_session()
+        self.current_session_index = index
+        self._restore_robot_session(index)
+        title = self.robot_sessions[index].get("title", f"Robo {index + 1}")
+        self.log(f"Switched to robot assembly tab: {title}")
+    def _clone_robot_for_workspace_calculation(self):
+        """Create a mesh-free robot copy so background IK cannot move the live UI robot."""
+        clone = Robot()
+
+        for name, link in self.robot.links.items():
+            copied = clone.add_link(name, mesh=None)
+            copied.color = getattr(link, "color", "lightgray")
+            copied.is_base = bool(getattr(link, "is_base", False))
+            copied.pick_pos = list(getattr(link, "pick_pos", [0.0, 0.0, 0.0]))
+            copied.place_pos = list(getattr(link, "place_pos", [0.0, 0.0, 0.0]))
+            copied.t_offset = np.array(getattr(link, "t_offset", np.eye(4)), dtype=float).copy()
+            copied.t_world = np.array(getattr(link, "t_world", np.eye(4)), dtype=float).copy()
+            if getattr(link, "custom_tcp_offset", None) is not None:
+                copied.custom_tcp_offset = np.array(link.custom_tcp_offset, dtype=float).copy()
+            if getattr(link, "auto_tcp_offset", None) is not None:
+                copied.auto_tcp_offset = np.array(link.auto_tcp_offset, dtype=float).copy()
+            copied.custom_tcp_rpy_deg = list(getattr(link, "custom_tcp_rpy_deg", [0.0, 0.0, 0.0]))
+            copied.mass = float(getattr(link, "mass", 1.0))
+            copied.inertia = dict(getattr(link, "inertia", copied.inertia))
+            copied.com = list(getattr(link, "com", [0.0, 0.0, 0.0]))
+
+        if self.robot.base_link is not None and self.robot.base_link.name in clone.links:
+            clone.base_link = clone.links[self.robot.base_link.name]
+
+        for name, joint in self.robot.joints.items():
+            if joint.parent_link.name not in clone.links or joint.child_link.name not in clone.links:
+                continue
+            copied_joint = clone.add_joint(name, joint.parent_link.name, joint.child_link.name)
+            copied_joint.joint_type = getattr(joint, "joint_type", "revolute")
+            copied_joint.is_gripper = bool(getattr(joint, "is_gripper", False))
+            copied_joint.origin = np.array(getattr(joint, "origin", np.zeros(3)), dtype=float).copy()
+            copied_joint.axis = np.array(getattr(joint, "axis", [0.0, 0.0, 1.0]), dtype=float).copy()
+            copied_joint.axis_name = getattr(joint, "axis_name", "Z")
+            copied_joint.min_limit = float(getattr(joint, "min_limit", -180.0))
+            copied_joint.max_limit = float(getattr(joint, "max_limit", 180.0))
+            copied_joint.current_value = float(getattr(joint, "current_value", 0.0))
+
+        clone.joint_relations = {
+            master: list(slaves)
+            for master, slaves in getattr(self.robot, "joint_relations", {}).items()
+        }
+        clone.home_joint_values = dict(getattr(self.robot, "home_joint_values", {}))
+        clone.update_kinematics()
+        return clone
 
     def _setup_live_point_refresh(self):
         """Continuously refresh the live point display while the UI is running."""
@@ -159,7 +890,100 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         """)
         self.experiment_btn.clicked.connect(self.toggle_experiment_panel)
         top_layout.addWidget(self.experiment_btn)
+
+        # --- Add Robo Button ---
+        self.add_robo_btn = QtWidgets.QPushButton("  Add Robo")
+        self.add_robo_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
+        self.add_robo_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.add_robo_btn.setToolTip("Start a new robot assembly")
+        self.add_robo_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                color: #6a1b9a;
+                border: 2px solid #6a1b9a;
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-weight: bold;
+                font-size: 13px;
+                margin-left: 8px;
+            }
+            QPushButton:hover {
+                background-color: #f3e5f5;
+                color: #4a148c;
+                border-color: #4a148c;
+            }
+            QPushButton:pressed {
+                background-color: #e1bee7;
+                color: #311b92;
+                border-color: #311b92;
+            }
+        """)
+        self.add_robo_btn.clicked.connect(self.add_robot_session)
+        top_layout.addWidget(self.add_robo_btn)
         
+        # --- Home TCP Coordinate Panel ---
+        home_widget = QtWidgets.QFrame()
+        home_widget.setStyleSheet(
+            "QFrame { background-color: white; border: 1px solid #cbd5df; border-radius: 10px; }"
+            "QLabel { color: #1f2933; font-size: 12px; }"
+            "QDoubleSpinBox { background: #fbfbff; border: 1px solid #d1d5db; border-radius: 5px; padding: 3px 6px; }"
+            "QPushButton { background: #ffffff; border: 1px solid #cbd5df; border-radius: 6px; padding: 4px 10px; font-size: 12px; }"
+            "QPushButton:hover { border-color: #1976d2; color: #1976d2; }"
+        )
+        home_layout = QtWidgets.QHBoxLayout(home_widget)
+        home_layout.setContentsMargins(10, 6, 10, 6)
+        home_layout.setSpacing(8)
+
+        home_label = QtWidgets.QLabel("Home TCP")
+        home_label.setStyleSheet("font-weight:700; color:#1976d2; margin-right: 10px;")
+        home_layout.addWidget(home_label)
+
+        home_layout.addWidget(QtWidgets.QLabel("X"))
+        self.home_x = QtWidgets.QDoubleSpinBox()
+        self.home_x.setRange(-10000.0, 10000.0)
+        self.home_x.setDecimals(2)
+        self.home_x.setSingleStep(0.1)
+        self.home_x.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.home_x.setFixedWidth(90)
+        self.home_x.setToolTip("Home X coordinate in cm")
+        home_layout.addWidget(self.home_x)
+
+        home_layout.addWidget(QtWidgets.QLabel("Y"))
+        self.home_y = QtWidgets.QDoubleSpinBox()
+        self.home_y.setRange(-10000.0, 10000.0)
+        self.home_y.setDecimals(2)
+        self.home_y.setSingleStep(0.1)
+        self.home_y.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.home_y.setFixedWidth(90)
+        self.home_y.setToolTip("Home Y coordinate in cm")
+        home_layout.addWidget(self.home_y)
+
+        home_layout.addWidget(QtWidgets.QLabel("Z"))
+        self.home_z = QtWidgets.QDoubleSpinBox()
+        self.home_z.setRange(-10000.0, 10000.0)
+        self.home_z.setDecimals(2)
+        self.home_z.setSingleStep(0.1)
+        self.home_z.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
+        self.home_z.setFixedWidth(90)
+        self.home_z.setToolTip("Home Z coordinate in cm")
+        home_layout.addWidget(self.home_z)
+
+        save_btn = QtWidgets.QPushButton("Save")
+        save_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        save_btn.setFixedHeight(30)
+        save_btn.clicked.connect(self.set_home_coords)
+        home_layout.addWidget(save_btn)
+
+        go_btn = QtWidgets.QPushButton("Go")
+        go_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        go_btn.setFixedHeight(30)
+        go_btn.clicked.connect(self.go_home_tcp)
+        home_layout.addWidget(go_btn)
+
+        top_layout.addStretch()
+        top_layout.addWidget(home_widget)
+        top_layout.addStretch()
+
         # --- Save/Open Buttons ---
         btn_file_style = """
             QPushButton {
@@ -180,7 +1004,16 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 background-color: #eeeeee;
             }
         """
-        
+
+        self.open_btn = QtWidgets.QPushButton("")
+        self.open_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
+        self.open_btn.setToolTip("Open")
+        self.open_btn.setStyleSheet(btn_file_style)
+        self.open_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.open_btn.setFixedWidth(42)
+        self.open_btn.clicked.connect(self.load_project)
+        top_layout.addWidget(self.open_btn)
+
         self.save_btn = QtWidgets.QPushButton("Save")
         self.save_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogSaveButton))
         self.save_btn.setStyleSheet(btn_file_style)
@@ -188,16 +1021,47 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.save_btn.clicked.connect(self.save_project)
         top_layout.addWidget(self.save_btn)
         
-        self.open_btn = QtWidgets.QPushButton("Open")
-        self.open_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton))
-        self.open_btn.setStyleSheet(btn_file_style)
-        self.open_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.open_btn.clicked.connect(self.load_project)
-        top_layout.addWidget(self.open_btn)
-        
-        top_layout.addStretch()
-        
         self.main_layout.addWidget(top_bar)
+
+        # --- Robot Session Tabs ---
+        self.session_tab_bar = QtWidgets.QTabBar()
+        self.session_tab_bar.setExpanding(False)
+        self.session_tab_bar.setMovable(True)
+        self.session_tab_bar.setDocumentMode(True)
+        self.session_tab_bar.setElideMode(QtCore.Qt.ElideNone)
+        self.session_tab_bar.setUsesScrollButtons(True)
+        self.session_tab_bar.setMinimumHeight(36)
+        self.session_tab_bar.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.session_tab_bar.customContextMenuRequested.connect(self.show_robot_session_menu)
+        self.session_tab_bar.setStyleSheet("""
+            QTabBar {
+                background: #ffffff;
+                border-bottom: 1px solid #d7dde5;
+            }
+            QTabBar::tab {
+                background: #f5f7fb;
+                color: #334155;
+                border: 1px solid #d7dde5;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                min-width: 104px;
+                min-height: 30px;
+                padding: 0 18px;
+                margin-left: 6px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background: #ffffff;
+                color: #1976d2;
+                border-color: #1976d2;
+            }
+        """)
+        for session in self.robot_sessions:
+            self.session_tab_bar.addTab(session.get("title", "Robo"))
+        self.session_tab_bar.setCurrentIndex(self.current_session_index)
+        self.session_tab_bar.currentChanged.connect(self.on_robot_session_changed)
+        self.main_layout.addWidget(self.session_tab_bar)
         
         # --- MAIN CONTENT AREA ---
         self.main_splitter = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
@@ -328,29 +1192,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         """)
         self.iso_btn.clicked.connect(lambda: self.canvas.view_isometric())
         
-        # --- Home Position Button (next to isometric) ---
-        self.home_btn = QtWidgets.QPushButton(self.canvas)
-        self.home_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DirHomeIcon))
-        self.home_btn.setToolTip("Reset Robot to Home Position (0°)")
-        self.home_btn.setFixedSize(38, 38)
-        self.home_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.home_btn.setStyleSheet("""
-            QPushButton {
-                background-color: white;
-                border: 2px solid #e0e0e0;
-                border-radius: 19px;
-                padding: 6px;
-            }
-            QPushButton:hover {
-                background-color: #f5f5f5;
-                border-color: #1976d2;
-            }
-            QPushButton:pressed {
-                background-color: #e3f2fd;
-            }
-        """)
-        self.home_btn.clicked.connect(self.reset_to_home)
-        
         # --- Focus Point Button (next to isometric) ---
         self.focus_btn = QtWidgets.QPushButton(self.canvas)
         self.focus_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_DialogApplyButton))
@@ -411,6 +1252,8 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         """)
         self.live_point_btn.clicked.connect(self._toggle_live_point_marker)
 
+        # Workspace plane / visualization buttons removed from the canvas
+
         # --- Floating Import Object Button (upper-left of canvas) ---
         # REMOVED: Moved to Simulation Panel sidebar
         
@@ -453,7 +1296,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         def patched_resize(event):
             original_resize(event)
             self.iso_btn.move(self.canvas.width() - 160, 24)
-            self.home_btn.move(self.canvas.width() - 204, 24)
             self.focus_btn.move(self.canvas.width() - 160, 68)
             self.live_point_btn.move(self.canvas.width() - 204, 68)
             self.gripper_surface_btn.move(self.canvas.width() - 180, self.canvas.height() - 60)
@@ -704,11 +1546,61 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             
         # Update 3D view
         self.canvas.update_transforms(self.robot)
+        self.update_live_ui()
         self.log("✅ Home Position Restored.")
         
         # Show a friendly toast if method exists
         if hasattr(self, 'show_toast'):
             self.show_toast("Home Position Reset", "success")
+
+    # --- Home coordinate helpers ---------------------------------
+    def set_home_coords(self):
+        """Save the current values from the Home X/Y/Z fields into the main window."""
+        self.home_tcp_coords = (float(self.home_x.value()), float(self.home_y.value()), float(self.home_z.value()))
+        self.log(f"Saved Home TCP coordinates: ({self.home_tcp_coords[0]:.2f}, {self.home_tcp_coords[1]:.2f}, {self.home_tcp_coords[2]:.2f}) cm")
+        if hasattr(self, 'show_toast'):
+            self.show_toast("Home Coordinates Saved", "success")
+
+    def go_home_tcp(self):
+        """Move the robot TCP to the saved home coordinates using IK."""
+        coords = getattr(
+            self,
+            "home_tcp_coords",
+            (float(self.home_x.value()), float(self.home_y.value()), float(self.home_z.value())),
+        )
+        tcp_link = self._get_preferred_tcp_link()
+        if tcp_link is None:
+            QtWidgets.QMessageBox.warning(self, "Go Home", "No valid TCP (End Effector) found for home movement.")
+            return
+
+        self.log(f"Moving TCP to Home coords: ({coords[0]:.2f}, {coords[1]:.2f}, {coords[2]:.2f}) cm")
+        success, info = self._move_tcp_to_xyz(coords[0], coords[1], coords[2], tcp_link)
+        if not success:
+            self.log("Failed to move to Home coordinates.")
+
+
+    def _stop_workspace_calc_thread(self, timeout_ms=3000):
+        """Stop the background workspace calculator before replacing or closing the window."""
+        thread = getattr(self, "workspace_calc_thread", None)
+        self._workspace_calc_pending = False
+        if thread is None:
+            return
+
+        try:
+            if thread.isRunning():
+                thread.requestInterruption()
+                if not thread.wait(int(timeout_ms)):
+                    thread.terminate()
+                    thread.wait(1000)
+        except RuntimeError:
+            pass
+        finally:
+            self.workspace_calc_thread = None
+
+    def closeEvent(self, event):
+        self._closing = True
+        self._stop_workspace_calc_thread(timeout_ms=3000)
+        super().closeEvent(event)
 
     def _toggle_live_point_marker(self):
         """Toggle the red live-point dot on the 3D canvas."""
@@ -718,6 +1610,51 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             "Live Point visible" if visible else "Live Point hidden",
             "info",
         )
+
+    def _toggle_workspace_plane(self):
+        """Toggle the reachable yellow drawing plane on the 3D canvas."""
+        btn = getattr(self, 'workspace_plane_btn', None)
+        if btn is None:
+            self.show_toast("Drawing plane control moved to sidebar", "info")
+            return
+
+        if getattr(self.canvas, "current_workspace_plan", None) is None:
+            btn.setChecked(False)
+            btn.setEnabled(False)
+            self.show_toast("Make Robo first to create a drawing plane", "warning")
+            return
+
+        visible = self.canvas.set_workspace_plane_visible(btn.isChecked())
+        btn.setChecked(visible)
+        self.show_toast(
+            "Drawing plane visible" if visible else "Drawing plane hidden",
+            "info",
+        )
+
+    def _toggle_workspace_visualization(self):
+        """Toggle the smooth reachable-workspace sphere on the 3D canvas."""
+        btn = getattr(self, 'workspace_visualization_btn', None)
+        if btn is None:
+            self.show_toast("Workspace visualization moved to sidebar", "info")
+            return
+
+        if getattr(self.canvas, "_workspace_cloud_points", None) is None:
+            btn.setChecked(False)
+            btn.setEnabled(False)
+            self.show_toast("Make Robo first to create reachable workspace", "warning")
+            return
+
+        visible = self.canvas.set_workspace_cloud_visible(btn.isChecked())
+        btn.setChecked(visible)
+        self.show_toast(
+            "Workspace sphere visible" if visible else "Workspace sphere hidden",
+            "info",
+        )
+
+    def load_workspace_plane_mode(self, mode_key):
+        """Workspace plane loading is disabled."""
+        self.log("Workspace plane and board visualization have been removed from the application.")
+        self.show_toast("Workspace plane removed", "info")
 
     def _get_preferred_tcp_link(self):
         links = list(self.robot.links.values())
@@ -736,6 +1673,14 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         tcp_candidates = [link for link in links if getattr(link, "custom_tcp_offset", None) is not None]
         if tcp_candidates:
             return max(tcp_candidates, key=chain_len)
+
+        gripper_anchor_candidates = []
+        for joint in self.robot.joints.values():
+            if getattr(joint, "is_gripper", False) and joint.parent_link is not None:
+                gripper_anchor_candidates.append(joint.parent_link)
+        if gripper_anchor_candidates:
+            unique_anchors = list(dict.fromkeys(gripper_anchor_candidates))
+            return max(unique_anchors, key=chain_len)
 
         gripper_candidates = [
             joint.child_link for joint in self.robot.joints.values()
@@ -787,7 +1732,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 continue
         
         if max_z < -1e11:
-            return # No geometry found
+            return False # No geometry found
             
         # 2. Second pass: Collect all vertices at the peak (with small epsilon)
         epsilon = 0.5 # 0.5 internal units (e.g. 0.05mm if units=mm)
@@ -810,7 +1755,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 continue
         
         if not top_verts_data:
-            return
+            return False
             
         # 3. Calculate Centroid of the peak
         top_pts = np.array([item[0] for item in top_verts_data])
@@ -833,6 +1778,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.custom_tcp_name = target_link.name
         
         self.log(f"📍 Auto-TCP Rewired: Live Point set to topmost center of '{target_link.name}' at Z={max_z/getattr(self.canvas, 'grid_units_per_cm', 1.0):.2f} cm.")
+        return True
 
     def make_robot(self):
         """
@@ -852,13 +1798,20 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         try:
             # --- KINEMATIC & STRUCTURAL ANALYSIS ---
             self.robot.update_kinematics()
-            
-            # Dynamically rewire Live Point to the peak of the robot
-            self._auto_detect_topmost_tcp()
-            
-            # Update kinematics again to ensure TCP calculations are fresh
-            self.robot.update_kinematics()
-            
+            tcp_link = self._get_preferred_tcp_link()
+            has_gripper_tip = bool(
+                tcp_link is not None
+                and any(getattr(joint, "is_gripper", False) for joint in tcp_link.child_joints)
+            )
+            if has_gripper_tip:
+                self._refresh_auto_tcp_offset(tcp_link)
+                self.custom_tcp_name = tcp_link.name
+                self.log(f"Live Point locked to gripper TCP on '{tcp_link.name}'.")
+            elif self._auto_detect_topmost_tcp():
+                self.log("Live Point locked from the current robot top-most point. It will now move with that TCP.")
+            else:
+                self.log("Could not auto-detect a top-most TCP from the current robot geometry.")
+
             joint_count = len(self.robot.joints)
             self.log("🔍 ANALYSING ROBOT STRUCTURE...")
             
@@ -885,93 +1838,101 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 self.experiment_tab.update_display()
 
             tcp_link = self._get_preferred_tcp_link()
-            workspace = None
-            structure = None
-            if joint_count and tcp_link is not None:
-                self.custom_tcp_name = tcp_link.name
-                # High-density workspace sampling (5000 samples for accuracy)
-                workspace = self.robot.compute_workspace(tcp_link, max_samples=5000)
-                if workspace.get("ok"):
-                    ratio = getattr(self.canvas, "grid_units_per_cm", 1.0) or 1.0
-                    bounds_min_cm = workspace["bounds_min"] / ratio
-                    bounds_max_cm = workspace["bounds_max"] / ratio
-                    radius_cm = workspace["radius_max"] / ratio
-                    directional = workspace.get("directional_reach", {})
-                    structure = self.robot.compute_structure_dynamics(
-                        tcp_link=tcp_link,
-                        workspace_report=workspace,
-                        length_scale=ratio,
-                    )
-                    self.canvas.show_workspace_cloud(workspace["points"])
-                    self.log(
-                        "Workspace computed: "
-                        f"{workspace['sample_count']} sampled configurations for TCP '{workspace['tcp_link']}'."
-                    )
-                    self.log("Workspace model is now available as IK seed memory for faster, smarter solves.")
-                    self.log(
-                        "Workspace bounds (cm): "
-                        f"X[{bounds_min_cm[0]:.2f}, {bounds_max_cm[0]:.2f}] "
-                        f"Y[{bounds_min_cm[1]:.2f}, {bounds_max_cm[1]:.2f}] "
-                        f"Z[{bounds_min_cm[2]:.2f}, {bounds_max_cm[2]:.2f}] "
-                        f"| max reach={radius_cm:.2f} cm"
-                    )
-                    if directional.get("ok"):
-                        cardinal = directional.get("cardinal_reach", {})
-                        self.log(
-                            "Directional max reach (cm): "
-                            f"+X={cardinal.get('+X', 0.0) / ratio:.2f}, "
-                            f"-X={cardinal.get('-X', 0.0) / ratio:.2f}, "
-                            f"+Y={cardinal.get('+Y', 0.0) / ratio:.2f}, "
-                            f"-Y={cardinal.get('-Y', 0.0) / ratio:.2f}, "
-                            f"+Z={cardinal.get('+Z', 0.0) / ratio:.2f}, "
-                            f"-Z={cardinal.get('-Z', 0.0) / ratio:.2f}"
-                        )
-                        best_dir = directional.get("best_direction", {})
-                        worst_dir = directional.get("worst_direction", {})
-                        self.log(
-                            "All-angle directional reach model ready: "
-                            f"max={directional.get('max_directional_reach', 0.0) / ratio:.2f} cm "
-                            f"at az={best_dir.get('azimuth_deg', 0.0):.1f} deg, el={best_dir.get('elevation_deg', 0.0):.1f} deg; "
-                            f"min={directional.get('min_directional_reach', 0.0) / ratio:.2f} cm "
-                            f"at az={worst_dir.get('azimuth_deg', 0.0):.1f} deg, el={worst_dir.get('elevation_deg', 0.0):.1f} deg."
-                        )
-                    if structure and structure.get("ok"):
-                        total_com = structure["total_com_cm"]
-                        balance_offset = structure["base_balance_offset_cm"]
-                        self.log(
-                            "Structure balance: "
-                            f"total mass={structure['total_mass']:.3f} kg, "
-                            f"COM=({total_com[0]:.2f}, {total_com[1]:.2f}, {total_com[2]:.2f}) cm, "
-                            f"base offset=({balance_offset[0]:.2f}, {balance_offset[1]:.2f}, {balance_offset[2]:.2f}) cm."
-                        )
-                        sampled_loads = structure.get("sampled_joint_loads", {})
-                        if sampled_loads:
-                            self.log("Joint load analysis (static gravity torque, N*cm):")
-                            for joint_name, load in sampled_loads.items():
-                                self.log(
-                                    f"  {joint_name}: "
-                                    f"max axis={load['max_abs_axis_torque_ncm']:.2f}, "
-                                    f"mean axis={load['mean_abs_axis_torque_ncm']:.2f}, "
-                                    f"max support={load['max_resultant_torque_ncm']:.2f}, "
-                                    f"max bending={load['max_bending_torque_ncm']:.2f}"
-                                )
-                else:
-                    self.canvas.show_workspace_cloud(None)
-                    self.log(f"Workspace computation skipped: {workspace.get('reason', 'unknown')}.")
-            else:
-                self.canvas.show_workspace_cloud(None)
+            self.canvas.show_workspace_cloud(None)
+            if hasattr(self, "workspace_visualization_btn"):
+                self.workspace_visualization_btn.setEnabled(False)
+                self.workspace_visualization_btn.setChecked(False)
+            self.last_workspace_report = None
 
             if joint_count:
                 self.log(f"Robot model ready: {joint_count} joint(s) linked from base '{self.robot.base_link.name}'.")
-                if workspace and workspace.get("ok"):
-                    self.show_toast("Assembly Finalized + Workspace + Dynamics Computed", "success")
+                self.show_toast("Assembly Finalized", "success")
             else:
                 self.log(f"Assembly refreshed with base '{self.robot.base_link.name}', but no joints are defined yet.")
+            
             return True
         except Exception as exc:
             self.log(f"MAKE ROBO ERROR: {exc}")
             self.show_toast("Unable to finalize assembly", "error")
             return False
+
+    def auto_calculate_inclined_workspace(self):
+        """
+        Start background calculation of optimal workspace dimensions.
+        """
+        if getattr(self, "_closing", False):
+            return
+
+        if self.workspace_calc_thread is not None and self.workspace_calc_thread.isRunning():
+            self.workspace_calc_thread.requestInterruption()
+            self._workspace_calc_pending = True
+            self.log("Previous workspace calculation is stopping; keeping the live point stable.")
+            return
+
+        tcp_link = self._get_preferred_tcp_link()
+        tcp_link_name = tcp_link.name if tcp_link is not None else None
+        if hasattr(self, "workspace_plane_btn"):
+            self.workspace_plane_btn.setEnabled(False)
+
+        try:
+            robot_for_calc = self._clone_robot_for_workspace_calculation()
+        except Exception as exc:
+            self.log(f"Workspace calculation skipped: could not snapshot robot ({exc}).")
+            return
+
+        self.log("📊 Computing optimal workspace dimensions...")
+        self._workspace_calc_pending = False
+        self.workspace_calc_thread = WorkspaceCalculatorThread(
+            robot_for_calc,
+            tcp_link_name,
+            plane_mode=getattr(self, "workspace_plane_mode", "inclined"),
+            workspace_points=(getattr(self, "last_workspace_report", None) or {}).get("points"),
+            parent=self,
+        )
+        self.workspace_calc_thread.finished.connect(self._on_workspace_calculated)
+        self.workspace_calc_thread.start()
+
+    def _on_workspace_calculated(self, result):
+        """Handle completed workspace calculation from background thread."""
+        thread = self.sender()
+        self.workspace_calc_thread = None
+        pending_restart = bool(getattr(self, "_workspace_calc_pending", False))
+        self._workspace_calc_pending = False
+
+        if thread is not None:
+            try:
+                thread.deleteLater()
+            except RuntimeError:
+                pass
+
+        if getattr(self, "_closing", False):
+            return
+
+        if result.get("cancelled"):
+            if pending_restart:
+                QtCore.QTimer.singleShot(0, self.auto_calculate_inclined_workspace)
+            return
+
+        error = result.get("error")
+        if error:
+            if hasattr(self, "workspace_plane_btn"):
+                self.workspace_plane_btn.setEnabled(False)
+            self.log(f"⚠️ Workspace calculation error: {error}")
+            return
+            
+        best_center = result.get("best_center")
+        best_origin = result.get("best_origin") or best_center
+        best_size = result.get("best_size")
+
+        if best_origin is None or best_size[0] < 10.0:
+            if hasattr(self, "workspace_plane_btn"):
+                self.workspace_plane_btn.setEnabled(False)
+            self.log("⚠️ Could not calculate optimal workspace (robot may not be fully reachable)")
+            return
+            
+        self.log(
+            f"Workspace analysis complete: {best_size[0]:.1f}×{best_size[1]:.1f} cm estimated near ({best_origin[0]:.1f}, {best_origin[1]:.1f}, {best_origin[2]:.1f})."
+        )
 
     def move_live_point_to_xyz(self, x_cm, y_cm, z_cm):
         """Solve joint angles so the robot live point/TCP reaches the given XYZ target in centimeters."""
@@ -1110,3 +2071,11 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
+
+
+
+
+
+
+

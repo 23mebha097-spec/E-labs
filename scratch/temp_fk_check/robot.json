@@ -1,0 +1,840 @@
+{
+    "links": [
+        {
+            "name": "01",
+            "mesh_file": "meshes/01.stl",
+            "color": "#e74c3c",
+            "is_base": true,
+            "t_offset": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.00044454433445794116
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.00020423891597340935
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    -0.015010221605185267
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "02",
+            "mesh_file": "meshes/02.stl",
+            "color": "#2ecc71",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    -0.0004538144319052748
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -0.049999999905556015
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    0.029999999329447732
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "03",
+            "mesh_file": "meshes/03.stl",
+            "color": "#e67e22",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    -6.834682614722719e-16,
+                    9.283976213017454e-16,
+                    0.0005303315888405203
+                ],
+                [
+                    9.283976213017446e-16,
+                    -1.2212453270876722e-15,
+                    -1.0,
+                    0.020882837008684874
+                ],
+                [
+                    6.834682614722731e-16,
+                    1.0,
+                    -1.2212453270876708e-15,
+                    0.08345401809472117
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "04",
+            "mesh_file": "meshes/04.stl",
+            "color": "#1abc9c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    -1.0,
+                    2.8047461157592443e-15,
+                    -3.75187375888591e-16,
+                    -0.0010606628932015344
+                ],
+                [
+                    2.804746115759245e-15,
+                    1.0,
+                    -3.1451149523498283e-15,
+                    0.14999999903457273
+                ],
+                [
+                    3.751873758885823e-16,
+                    -3.145114952349833e-15,
+                    -1.0,
+                    0.03676567133516058
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "05",
+            "mesh_file": "meshes/05.stl",
+            "color": "#1abc9c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    -1.0,
+                    3.5022939058239767e-15,
+                    -3.223604141761444e-16,
+                    -0.0005303314394273319
+                ],
+                [
+                    3.5022939058239767e-15,
+                    1.0,
+                    -1.4797804154120941e-15,
+                    0.14854598121101065
+                ],
+                [
+                    3.223604141761389e-16,
+                    -1.4797804154120959e-15,
+                    -1.0,
+                    0.035382836591452124
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "06",
+            "mesh_file": "meshes/06.stl",
+            "color": "#3498db",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    1.6259454113664749e-15,
+                    1.2585513716222704e-15,
+                    -1.010435722265335e-10
+                ],
+                [
+                    -1.25855137162227e-15,
+                    -4.440892098500649e-16,
+                    1.0,
+                    0.07800000160932546
+                ],
+                [
+                    1.6259454113664753e-15,
+                    -1.0,
+                    -4.4408920985006094e-16,
+                    0.017000000320479932
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "07",
+            "mesh_file": "meshes/07.stl",
+            "color": "#e74c3c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    -1.0,
+                    1.2246467991473542e-16,
+                    -1.2246467991473527e-16,
+                    -0.039968731403350846
+                ],
+                [
+                    -1.2246467991473537e-16,
+                    3.944304526105059e-31,
+                    1.0,
+                    -0.0389999990584329
+                ],
+                [
+                    1.2246467991473522e-16,
+                    1.0,
+                    -3.944304526105059e-31,
+                    0.05000000030733642
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "08",
+            "mesh_file": "meshes/08.stl",
+            "color": "#e74c3c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    -1.0,
+                    1.2246467991473547e-16,
+                    -1.2246467991473532e-16,
+                    3.446264192465594e-05
+                ],
+                [
+                    -1.2246467991473542e-16,
+                    3.944304526105059e-31,
+                    1.0,
+                    -0.0389999990584329
+                ],
+                [
+                    1.2246467991473527e-16,
+                    1.0,
+                    -3.944304526105059e-31,
+                    0.05000000029802332
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        }
+    ],
+    "joints": [
+        {
+            "name": "joint_01_02",
+            "parent_link": "01",
+            "child_link": "02",
+            "joint_type": "revolute",
+            "origin": [
+                -0.0004538144247317818,
+                -0.04999999990555602,
+                0.029999999329447746
+            ],
+            "axis": [
+                0,
+                0,
+                1
+            ],
+            "min_limit": -180.0,
+            "max_limit": 180.0,
+            "current_value": -129.65678764731567,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        },
+        {
+            "name": "joint_02_03",
+            "parent_link": "02",
+            "child_link": "03",
+            "joint_type": "revolute",
+            "origin": [
+                1.422398474435686e-10,
+                -0.014499999582767487,
+                0.08200000027115915
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "min_limit": -90.0,
+            "max_limit": 90.0,
+            "current_value": -90.0,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        },
+        {
+            "name": "joint_03_04",
+            "parent_link": "03",
+            "child_link": "04",
+            "joint_type": "revolute",
+            "origin": [
+                -0.0005303314466008697,
+                0.14854598121101062,
+                0.001382834743708126
+            ],
+            "axis": [
+                0,
+                0,
+                1
+            ],
+            "min_limit": -90.0,
+            "max_limit": 90.0,
+            "current_value": -26.0,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        },
+        {
+            "name": "joint_04_05",
+            "parent_link": "04",
+            "child_link": "05",
+            "joint_type": "revolute",
+            "origin": [
+                -0.0005303314466008698,
+                0.14854598121101065,
+                0.0013828347437081219
+            ],
+            "axis": [
+                0,
+                0,
+                1
+            ],
+            "min_limit": -90.0,
+            "max_limit": 90.0,
+            "current_value": 26.0,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        },
+        {
+            "name": "joint_05_06",
+            "parent_link": "05",
+            "child_link": "06",
+            "joint_type": "revolute",
+            "origin": [
+                -9.387010108936444e-11,
+                0.07800000160932541,
+                0.017000000320479894
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "min_limit": -180.0,
+            "max_limit": 180.0,
+            "current_value": 180.0,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        },
+        {
+            "name": "joint_06_07",
+            "parent_link": "06",
+            "child_link": "07",
+            "joint_type": "revolute",
+            "origin": [
+                0.007531268298625946,
+                0.00100000004749745,
+                0.05000000029802326
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "min_limit": 0.0,
+            "max_limit": 45.0,
+            "current_value": 0.0,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        },
+        {
+            "name": "joint_06_08",
+            "parent_link": "06",
+            "child_link": "08",
+            "joint_type": "revolute",
+            "origin": [
+                -0.0074655373208224775,
+                0.00100000004749745,
+                0.05000000029802326
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "min_limit": -45.0,
+            "max_limit": 0.0,
+            "current_value": 0.0,
+            "is_gripper": false,
+            "contact_surface_name": null,
+            "contact_surface_link_name": null,
+            "contact_surface_center_local": null,
+            "contact_surface_normal_local": null,
+            "gripping_surface_name": null,
+            "gripping_surface_link_name": null,
+            "gripping_surface_center_local": null,
+            "gripping_surface_normal_local": null,
+            "paired_gripping_enabled": false,
+            "paired_gripping_surface_joint_name": null,
+            "paired_gripping_surface_name": null,
+            "paired_gripping_surface_link_name": null,
+            "paired_gripping_surface_center_local": null,
+            "paired_gripping_surface_normal_local": null
+        }
+    ],
+    "ui_state": {
+        "joint_panel_joints": {
+            "02": {
+                "parent": "01",
+                "axis": 2,
+                "local_axis_vector": [
+                    0,
+                    0,
+                    1
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "min": -180.0,
+                "max": 180.0,
+                "current_angle": -95.1,
+                "alignment_point": [
+                    -9.27009027384062e-06,
+                    -0.04979576098958261,
+                    0.014989777724262479
+                ],
+                "custom_name": "joint_01_02",
+                "joint_id": "joint_01_02"
+            },
+            "03": {
+                "parent": "02",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    1.0,
+                    0.0
+                ],
+                "min": -90.0,
+                "max": 90.0,
+                "current_angle": -71.8,
+                "alignment_point": [
+                    -9.269955207486204e-06,
+                    -0.06429576057235009,
+                    0.09698977799542162
+                ],
+                "custom_name": "joint_02_03",
+                "joint_id": "joint_02_03"
+            },
+            "04": {
+                "parent": "03",
+                "axis": 2,
+                "local_axis_vector": [
+                    0,
+                    0,
+                    1
+                ],
+                "world_axis_vector": [
+                    9.283976213017454e-16,
+                    -1.0,
+                    -1.2212453270876708e-15
+                ],
+                "min": -90.0,
+                "max": 90.0,
+                "current_angle": -56.2,
+                "alignment_point": [
+                    -9.269955207783323e-06,
+                    -0.030295758724606037,
+                    0.24698977702999425
+                ],
+                "custom_name": "joint_03_04",
+                "joint_id": "joint_03_04"
+            },
+            "05": {
+                "parent": "04",
+                "axis": 2,
+                "local_axis_vector": [
+                    0,
+                    0,
+                    1
+                ],
+                "world_axis_vector": [
+                    -1.3035849971903343e-15,
+                    1.0,
+                    -1.9238696252621577e-15
+                ],
+                "min": -90.0,
+                "max": 90.0,
+                "current_angle": -7.4,
+                "alignment_point": [
+                    -9.269955207233307e-06,
+                    -0.06429576057235008,
+                    0.3969897760645669
+                ],
+                "custom_name": "joint_04_05",
+                "joint_id": "joint_04_05"
+            },
+            "06": {
+                "parent": "05",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    -1.3810160515370052e-15,
+                    4.440892098500626e-16,
+                    1.0
+                ],
+                "min": -180.0,
+                "max": 180.0,
+                "current_angle": -4.0,
+                "alignment_point": [
+                    -9.270056250996624e-06,
+                    -0.04729575904508594,
+                    0.4749897776738923
+                ],
+                "custom_name": "joint_05_06",
+                "joint_id": "joint_05_06"
+            },
+            "07": {
+                "parent": "06",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    1.0,
+                    -8.881784197001256e-16
+                ],
+                "min": 0.0,
+                "max": 45.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    0.007521998235201472,
+                    -0.04629575899758849,
+                    0.5249897779719156
+                ],
+                "custom_name": "joint_06_07",
+                "joint_id": "joint_06_07"
+            },
+            "08": {
+                "parent": "06",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    1.0,
+                    -8.881784197001256e-16
+                ],
+                "min": -45.0,
+                "max": 0.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -0.007474807384246951,
+                    -0.04629575899758849,
+                    0.5249897779719156
+                ],
+                "custom_name": "joint_06_08",
+                "joint_id": "joint_06_08"
+            }
+        },
+        "program_code": "# Command format: JOINT Name Angle\nJOINT Shoulder 45\nWAIT 1.0\nJOINT Shoulder -45\nWAIT 1.0\n\njoint_01_02 0\njoint_02_03 0\njoint_03_04 0\njoint_04_05 0\njoint_05_06 0\njoint_06_07 0\njoint_06_08 0",
+        "live_sync": false,
+        "alignment_point": [
+            -0.007474807384246951,
+            -0.04629575899758849,
+            0.5249897779719156
+        ],
+        "alignment_normal": [
+            0.0,
+            1.0,
+            -8.881784197001256e-16
+        ],
+        "alignment_cache": {
+            "01|||02": [
+                -9.27009027384062e-06,
+                -0.04979576098958261,
+                0.014989777724262479
+            ],
+            "02|||03": [
+                -9.269955207486204e-06,
+                -0.06429576057235009,
+                0.09698977799542162
+            ],
+            "03|||04": [
+                -9.269955207783323e-06,
+                -0.030295758724606037,
+                0.24698977702999425
+            ],
+            "04|||05": [
+                -9.269955207233307e-06,
+                -0.06429576057235008,
+                0.3969897760645669
+            ],
+            "05|||06": [
+                -9.270056250996624e-06,
+                -0.04729575904508594,
+                0.4749897776738923
+            ],
+            "06|||07": [
+                0.007521998235201472,
+                -0.04629575899758849,
+                0.5249897779719156
+            ],
+            "06|||08": [
+                -0.007474807384246951,
+                -0.04629575899758849,
+                0.5249897779719156
+            ]
+        },
+        "current_speed": 50,
+        "camera_position": [
+            [
+                1.2670046256315317,
+                1.3258603579190105,
+                1.398556289218309
+            ],
+            [
+                0.8102083395031273,
+                0.8690640717906067,
+                0.9417600030899048
+            ],
+            [
+                0.0,
+                0.0,
+                1.0
+            ]
+        ],
+        "home_point": [
+            30.0,
+            30.0,
+            30.0
+        ]
+    },
+    "joint_relations": {
+        "joint_06_07": [
+            [
+                "joint_06_08",
+                -1.0
+            ]
+        ]
+    }
+}

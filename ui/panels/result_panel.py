@@ -33,23 +33,16 @@ class ResultPanel(QtWidgets.QWidget):
         layout.addWidget(self.result_view)
 
     def update_display(self, fk_results=None):
-        if not fk_results:
-            self.result_view.setHtml(
-                "<div style='margin-top: 50px; text-align: center;'>"
-                "<p style='color:#b0bec5; font-size: 18px; font-style: italic;'>No computation data available.</p>"
-                "<p style='color:#cfd8dc; font-size: 14px;'>Adjust joint rotations or run IK/FK to see results here.</p>"
-                "</div>"
-            )
-            return
+        fk_results = fk_results or []
 
         # Use the globally accurate live point if available, otherwise fall back to DH calculation
         p = getattr(self.mw, "current_live_point_cm", None)
-        if p is None:
+        if p is None and fk_results:
             # Fallback to DH-based end-effector position
             ee_result = fk_results[-1]
             p = ee_result["cumulative"][:3, 3]
 
-        # Calculate the 4x4 Transform Matrix
+        # Calculate the 4x4 Transform Matrix for the live point / TCP
         T_matrix = None
         if hasattr(self.mw, "robot") and hasattr(self.mw, "_get_preferred_tcp_link"):
             tcp_link = getattr(self.mw, "_get_preferred_tcp_link")()
@@ -59,9 +52,18 @@ class ResultPanel(QtWidgets.QWidget):
                 T_raw[:3, 3] /= ratio
                 T_matrix = T_raw
 
-        if T_matrix is None:
+        if T_matrix is None and fk_results:
             ee_result = fk_results[-1]
             T_matrix = ee_result["cumulative"]
+
+        if T_matrix is None:
+            self.result_view.setHtml(
+                "<div style='margin-top: 50px; text-align: center;'>"
+                "<p style='color:#b0bec5; font-size: 18px; font-style: italic;'>No computation data available.</p>"
+                "<p style='color:#cfd8dc; font-size: 14px;'>Adjust joint rotations or run IK/FK to see results here.</p>"
+                "</div>"
+            )
+            return
 
         html = """
         <style>
@@ -154,9 +156,9 @@ class ResultPanel(QtWidgets.QWidget):
             f"<div class='section-box'>"
             f"<div class='section-head'>Live Point Position</div>"
             f"<div class='pos-container'>"
-            f"<span class='pos-item'><span class='pos-label'>X:</span>{p[0]:.3f}</span>"
-            f"<span class='pos-item'><span class='pos-label'>Y:</span>{p[1]:.3f}</span>"
-            f"<span class='pos-item'><span class='pos-label'>Z:</span>{p[2]:.3f}</span>"
+            f"<span class='pos-item'><span class='pos-label'>X:</span>{p[0]:.1f}</span>"
+            f"<span class='pos-item'><span class='pos-label'>Y:</span>{p[1]:.1f}</span>"
+            f"<span class='pos-item'><span class='pos-label'>Z:</span>{p[2]:.1f}</span>"
             f"</div>"
             f"</div>"
         )
@@ -164,7 +166,7 @@ class ResultPanel(QtWidgets.QWidget):
         # 2. Transform Matrix Section
         html += (
             f"<div class='section-box'>"
-            f"<div class='section-head'>Live Point Transform Matrix (4x4)</div>"
+            f"<div class='section-head'>Final Live Point Matrix (4x4)</div>"
             f"<table class='matrix-table'>"
         )
         for i in range(4):
@@ -173,9 +175,9 @@ class ResultPanel(QtWidgets.QWidget):
                 val = T_matrix[i, j]
                 # Format translation differently (with 3 decimal places) vs rotation (with 4)
                 if j == 3 and i < 3:
-                    html += f"<td>{val:8.3f}</td>"
+                    html += f"<td>{val:8.1f}</td>"
                 else:
-                    html += f"<td>{val:8.4f}</td>"
+                    html += f"<td>{val:8.1f}</td>"
             html += "</tr>"
         html += "</table></div>"
 
@@ -187,18 +189,25 @@ class ResultPanel(QtWidgets.QWidget):
             f"<tr><th>Joint</th><th>&theta; (deg)</th><th>d (cm)</th><th>a (cm)</th><th>&alpha; (deg)</th></tr>"
         )
 
-        for res in fk_results:
-            is_prismatic = res["joint_type"] == "prismatic"
-            theta = res["theta0_deg"] + (0 if is_prismatic else res["q_value"])
-            d = res["d"] + (res["q_value"] if is_prismatic else 0)
-            
+        if fk_results:
+            for res in fk_results:
+                is_prismatic = res["joint_type"] == "prismatic"
+                theta = res["theta0_deg"] + (0 if is_prismatic else res["q_value"])
+                d = res["d"] + (res["q_value"] if is_prismatic else 0)
+
+                html += (
+                    f"<tr>"
+                    f"<td class='joint-name'>{res['title']}</td>"
+                    f"<td>{theta:.2f}</td>"
+                    f"<td>{d:.2f}</td>"
+                    f"<td>{res['a']:.2f}</td>"
+                    f"<td>{res['alpha_deg']:.2f}</td>"
+                    f"</tr>"
+                )
+        else:
             html += (
                 f"<tr>"
-                f"<td class='joint-name'>{res['title']}</td>"
-                f"<td>{theta:.2f}</td>"
-                f"<td>{d:.2f}</td>"
-                f"<td>{res['a']:.2f}</td>"
-                f"<td>{res['alpha_deg']:.2f}</td>"
+                f"<td class='joint-name' colspan='5' style='text-align:center; padding:20px;'>No FK data available</td>"
                 f"</tr>"
             )
 

@@ -373,7 +373,7 @@ class MatricesPanel(QtWidgets.QWidget):
             html += (
                 f"<div class='sub-head'>Cumulative T0{idx}"
                 f"<span style='font-weight:normal; color:#64748b; font-size:11px; margin-left:10px;'>"
-                f"Pivot Point: ({px:.3f}, {py:.3f}, {pz:.3f}) cm"
+                f"Pivot Point: ({px:.1f}, {py:.1f}, {pz:.1f}) cm"
                 f"</span></div>"
             )
             html += self.format_matrix_html(result["cumulative"])
@@ -406,7 +406,7 @@ class MatricesPanel(QtWidgets.QWidget):
             table += '<tr>'
             for c_idx, val in enumerate(row):
                 cls = ' class="t-col"' if c_idx == 3 else ''
-                table += f'<td{cls}>{val:8.3f}</td>'
+                table += f'<td{cls}>{val:8.1f}</td>'
             table += '</tr>'
         table += '</table>'
         return table

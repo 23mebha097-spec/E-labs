@@ -1,0 +1,737 @@
+{
+    "links": [
+        {
+            "name": "A- FIX BASE",
+            "mesh_file": "meshes/A- FIX BASE.stl",
+            "color": "#9b59b6",
+            "is_base": true,
+            "t_offset": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    0.44455037889705823
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    0.20372896383870578
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    -15.010273594959717
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "B- 360 BASE ON FIXED BASE",
+            "mesh_file": "meshes/B- 360 BASE ON FIXED BASE.stl",
+            "color": "#1abc9c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    -0.4538144017726991
+                ],
+                [
+                    0.0,
+                    1.0,
+                    0.0,
+                    -49.99999999999992
+                ],
+                [
+                    0.0,
+                    0.0,
+                    1.0,
+                    30.000000000000018
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "C&D- SHOULDER 180 & ELBOW",
+            "mesh_file": "meshes/C&D- SHOULDER 180 & ELBOW.stl",
+            "color": "#e67e22",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    0.0,
+                    0.0,
+                    1.8324152506465907e-07
+                ],
+                [
+                    0.0,
+                    1.2246467991473532e-16,
+                    -1.0,
+                    19.49999999999993
+                ],
+                [
+                    0.0,
+                    1.0,
+                    1.2246467991473532e-16,
+                    82.00000000000004
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "C&D- SHOULDER 180 & ELBOW_1",
+            "mesh_file": "meshes/C&D- SHOULDER 180 & ELBOW_1.stl",
+            "color": "#e67e22",
+            "is_base": false,
+            "t_offset": [
+                [
+                    -1.0,
+                    -1.4012870921496655e-33,
+                    -1.2246467991473532e-16,
+                    4.220582217051572e-15
+                ],
+                [
+                    0.0,
+                    1.0,
+                    -1.1442377452219667e-17,
+                    150.0
+                ],
+                [
+                    1.2246467991473532e-16,
+                    -1.1442377452219667e-17,
+                    -1.0,
+                    34.00000000000006
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "E- WRISTPITCH",
+            "mesh_file": "meshes/E- WRISTPITCH.stl",
+            "color": "#1abc9c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    -1.0,
+                    1.2246467991473537e-16,
+                    1.4934596669092562e-48,
+                    8.385653282871885e-15
+                ],
+                [
+                    1.224646799147354e-16,
+                    1.0,
+                    -3.4327132356658975e-17,
+                    150.0
+                ],
+                [
+                    3.290492165754499e-32,
+                    -3.432713235665899e-17,
+                    -1.0,
+                    34.00000000000007
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "F-WRIST  ROLL",
+            "mesh_file": "meshes/F-WRIST  ROLL.stl",
+            "color": "#1abc9c",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    1.224646799147353e-16,
+                    4.930380657631324e-32,
+                    -1.100435282914286e-07
+                ],
+                [
+                    -2.465190328815662e-32,
+                    -9.957992501029598e-17,
+                    1.0,
+                    78.0
+                ],
+                [
+                    1.2246467991473537e-16,
+                    -1.0,
+                    -9.957992501029601e-17,
+                    17.00000033395388
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "G-GRIPPER",
+            "mesh_file": "meshes/G-GRIPPER.stl",
+            "color": "#95a5a6",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    -2.465190328815662e-32,
+                    -1.2246467991473535e-16,
+                    0.0312682103689032
+                ],
+                [
+                    -1.2246467991473532e-16,
+                    -9.957992501029599e-17,
+                    -1.0,
+                    40.99999999999993
+                ],
+                [
+                    -2.465190328815662e-32,
+                    1.0,
+                    -9.957992501029599e-17,
+                    50.00000000498318
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        },
+        {
+            "name": "H-GRIPPER 2",
+            "mesh_file": "meshes/H-GRIPPER 2.stl",
+            "color": "#2ecc71",
+            "is_base": false,
+            "t_offset": [
+                [
+                    1.0,
+                    1.2246467991473535e-16,
+                    2.802574184299331e-33,
+                    40.03446233788939
+                ],
+                [
+                    4.9041950572795114e-32,
+                    2.2884754904439333e-17,
+                    -1.0,
+                    40.999999999999986
+                ],
+                [
+                    -1.2246467991473537e-16,
+                    1.0,
+                    2.2884754904439333e-17,
+                    49.99999999999994
+                ],
+                [
+                    0.0,
+                    0.0,
+                    0.0,
+                    1.0
+                ]
+            ],
+            "is_sim_obj": false,
+            "pick_pos": [
+                0.0,
+                0.0,
+                0.0
+            ],
+            "place_pos": [
+                0.0,
+                0.0,
+                0.0
+            ]
+        }
+    ],
+    "joints": [
+        {
+            "name": "j1",
+            "parent_link": "A- FIX BASE",
+            "child_link": "B- 360 BASE ON FIXED BASE",
+            "joint_type": "revolute",
+            "origin": [
+                -0.4538144017727049,
+                -49.99999999999998,
+                29.999999999999993
+            ],
+            "axis": [
+                0,
+                0,
+                1
+            ],
+            "axis_name": "Z",
+            "min_limit": -180.0,
+            "max_limit": 180.0,
+            "current_value": 0.0
+        },
+        {
+            "name": "j2",
+            "parent_link": "B- 360 BASE ON FIXED BASE",
+            "child_link": "C&D- SHOULDER 180 & ELBOW",
+            "joint_type": "revolute",
+            "origin": [
+                1.8324149936993495e-07,
+                -14.5,
+                82.00000000000001
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "axis_name": "Y",
+            "min_limit": -90.0,
+            "max_limit": 90.0,
+            "current_value": 0.0
+        },
+        {
+            "name": "joint_C&D-_SHOULDER_180_&_ELBOW_C&D-_SHOULDER_180_&_ELBOW_1",
+            "parent_link": "C&D- SHOULDER 180 & ELBOW",
+            "child_link": "C&D- SHOULDER 180 & ELBOW_1",
+            "joint_type": "revolute",
+            "origin": [
+                2.7755575615628914e-17,
+                150.0,
+                1.8258083560173133e-15
+            ],
+            "axis": [
+                0,
+                0,
+                1
+            ],
+            "axis_name": "Z",
+            "min_limit": -90.0,
+            "max_limit": 90.0,
+            "current_value": 0.0
+        },
+        {
+            "name": "j4",
+            "parent_link": "C&D- SHOULDER 180 & ELBOW_1",
+            "child_link": "E- WRISTPITCH",
+            "joint_type": "revolute",
+            "origin": [
+                2.7755575615628914e-17,
+                150.00000000000006,
+                -1.0526027429049931e-14
+            ],
+            "axis": [
+                0,
+                0,
+                1
+            ],
+            "axis_name": "Z",
+            "min_limit": -90.0,
+            "max_limit": 90.0,
+            "current_value": 0.0
+        },
+        {
+            "name": "j5",
+            "parent_link": "E- WRISTPITCH",
+            "child_link": "F-WRIST  ROLL",
+            "joint_type": "revolute",
+            "origin": [
+                -1.1004351406322666e-07,
+                78.0,
+                17.000000333953913
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "axis_name": "Y",
+            "min_limit": -180.0,
+            "max_limit": 180.0,
+            "current_value": 0.0
+        },
+        {
+            "name": "j6",
+            "parent_link": "F-WRIST  ROLL",
+            "child_link": "G-GRIPPER",
+            "joint_type": "revolute",
+            "origin": [
+                7.531268160533607,
+                0.9999999999999949,
+                50.00000000000006
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "axis_name": "Y",
+            "min_limit": 0.0,
+            "max_limit": 45.0,
+            "current_value": 0.0
+        },
+        {
+            "name": "j7",
+            "parent_link": "F-WRIST  ROLL",
+            "child_link": "H-GRIPPER 2",
+            "joint_type": "revolute",
+            "origin": [
+                -7.465537483345472,
+                0.9999999999999949,
+                49.99999999999994
+            ],
+            "axis": [
+                0,
+                1,
+                0
+            ],
+            "axis_name": "Y",
+            "min_limit": -45.0,
+            "max_limit": 0.0,
+            "current_value": 0.0
+        }
+    ],
+    "ui_state": {
+        "joint_panel_joints": {
+            "B- 360 BASE ON FIXED BASE": {
+                "parent": "A- FIX BASE",
+                "axis": 2,
+                "local_axis_vector": [
+                    0,
+                    0,
+                    1
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    0.0,
+                    1.0
+                ],
+                "min": -180.0,
+                "max": 180.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -0.00926402287564665,
+                    -49.79627103616127,
+                    14.989726405040276
+                ],
+                "custom_name": "j1",
+                "joint_id": "j1"
+            },
+            "C&D- SHOULDER 180 & ELBOW": {
+                "parent": "B- 360 BASE ON FIXED BASE",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    1.0,
+                    0.0
+                ],
+                "min": -90.0,
+                "max": 90.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -0.009263839634141506,
+                    -64.29627103616122,
+                    96.98972640504032
+                ],
+                "custom_name": "j2",
+                "joint_id": "j2"
+            },
+            "C&D- SHOULDER 180 & ELBOW_1": {
+                "parent": "C&D- SHOULDER 180 & ELBOW",
+                "axis": 2,
+                "local_axis_vector": [
+                    0,
+                    0,
+                    1
+                ],
+                "world_axis_vector": [
+                    0.0,
+                    -1.0,
+                    1.2246467991473532e-16
+                ],
+                "min": -90.0,
+                "max": 90.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -0.009263839634115784,
+                    -30.29627103616127,
+                    246.98972640504036
+                ],
+                "custom_name": "joint_C&D- SHOULDER 180 & ELBOW_C&D- SHOULDER 180 & ELBOW_1",
+                "joint_id": "joint_C&D-_SHOULDER_180_&_ELBOW_C&D-_SHOULDER_180_&_ELBOW_1"
+            },
+            "E- WRISTPITCH": {
+                "parent": "C&D- SHOULDER 180 & ELBOW_1",
+                "axis": 2,
+                "local_axis_vector": [
+                    0,
+                    0,
+                    1
+                ],
+                "world_axis_vector": [
+                    -1.2246467991473532e-16,
+                    1.0,
+                    -1.3390705736695499e-16
+                ],
+                "min": -90.0,
+                "max": 90.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -0.009263839634111619,
+                    -64.29627103616131,
+                    396.9897264050404
+                ],
+                "custom_name": "j4",
+                "joint_id": "j4"
+            },
+            "F-WRIST  ROLL": {
+                "parent": "E- WRISTPITCH",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    -1.2246467991473537e-16,
+                    9.957992501029598e-17,
+                    1.0
+                ],
+                "min": -180.0,
+                "max": 180.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -0.009263949677645673,
+                    -47.29627137011514,
+                    474.98972640504036
+                ],
+                "custom_name": "j5",
+                "joint_id": "j5"
+            },
+            "G-GRIPPER": {
+                "parent": "F-WRIST  ROLL",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    -2.465190328815662e-32,
+                    1.0,
+                    -1.9915985002059197e-16
+                ],
+                "min": 0.0,
+                "max": 45.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    7.522004210855941,
+                    -46.2962713701151,
+                    524.9897264050404
+                ],
+                "custom_name": "j6",
+                "joint_id": "j6"
+            },
+            "H-GRIPPER 2": {
+                "parent": "F-WRIST  ROLL",
+                "axis": 1,
+                "local_axis_vector": [
+                    0,
+                    1,
+                    0
+                ],
+                "world_axis_vector": [
+                    -2.465190328815662e-32,
+                    1.0,
+                    -1.9915985002059197e-16
+                ],
+                "min": -45.0,
+                "max": 0.0,
+                "current_angle": 0.0,
+                "alignment_point": [
+                    -7.4748014330231385,
+                    -46.2962713701151,
+                    524.9897264050403
+                ],
+                "custom_name": "j7",
+                "joint_id": "j7"
+            }
+        },
+        "program_code": "",
+        "live_sync": false,
+        "alignment_point": [
+            -7.4748014330231385,
+            -46.2962713701151,
+            524.9897264050403
+        ],
+        "alignment_normal": [
+            -2.465190328815662e-32,
+            1.0,
+            -1.9915985002059197e-16
+        ],
+        "alignment_cache": {
+            "A- FIX BASE|||B- 360 BASE ON FIXED BASE": [
+                -0.00926402287564665,
+                -49.79627103616127,
+                14.989726405040276
+            ],
+            "B- 360 BASE ON FIXED BASE|||C&D- SHOULDER 180 & ELBOW": [
+                -0.009263839634141506,
+                -64.29627103616122,
+                96.98972640504032
+            ],
+            "C&D- SHOULDER 180 & ELBOW|||C&D- SHOULDER 180 & ELBOW_1": [
+                -0.009263839634115784,
+                -30.29627103616127,
+                246.98972640504036
+            ],
+            "C&D- SHOULDER 180 & ELBOW_1|||E- WRISTPITCH": [
+                -0.009263839634111619,
+                -64.29627103616131,
+                396.9897264050404
+            ],
+            "E- WRISTPITCH|||F-WRIST  ROLL": [
+                -0.009263949677645673,
+                -47.29627137011514,
+                474.98972640504036
+            ],
+            "F-WRIST  ROLL|||G-GRIPPER": [
+                7.522004210855941,
+                -46.2962713701151,
+                524.9897264050404
+            ],
+            "F-WRIST  ROLL|||H-GRIPPER 2": [
+                -7.4748014330231385,
+                -46.2962713701151,
+                524.9897264050403
+            ]
+        },
+        "current_speed": 50,
+        "camera_position": [
+            [
+                -73.42630268938643,
+                607.9502832501338,
+                774.9000535826902
+            ],
+            [
+                -130.7354790031821,
+                186.7259582566083,
+                634.3072607422499
+            ],
+            [
+                -0.19642428879264442,
+                -0.2862850394055518,
+                0.9377944204274549
+            ]
+        ]
+    },
+    "joint_relations": {
+        "j6": [
+            [
+                "j7",
+                -1.0
+            ]
+        ]
+    }
+}

@@ -4,9 +4,12 @@ import os
 import re
 import numpy as np
 
+from elabs import Robot
+from elabs.runtime import simulation_context
+
 
 class RobotSyntaxHighlighter(QtGui.QSyntaxHighlighter):
-    """Syntax highlighter for robot programming languages (Command, Python, Matlab)."""
+    """Syntax highlighter for robot programming languages (Command, Python)."""
 
     def __init__(self, document, lang="command"):
         super().__init__(document)
@@ -65,9 +68,13 @@ class RobotSyntaxHighlighter(QtGui.QSyntaxHighlighter):
                 self.rules.append((re.compile(kw), keyword_fmt))
             # Builtins & Robot API
             for bi in [r'\bprint\b', r'\brange\b', r'\blen\b', r'\bint\b', r'\bfloat\b', r'\bstr\b',
-                       r'\brobot\.move\b', r'\brobot\.move_xyz\b', r'\brobot\.wait\b', 
+                       r'\bRobot\b', r'\brobot\.move\b', r'\brobot\.move_joint\b',
+                       r'\brobot\.move_xyz\b', r'\brobot\.move_tcp\b', r'\brobot\.wait\b',
                        r'\brobot\.home\b', r'\brobot\.get_joint\b', r'\brobot\.get_tcp\b',
-                       r'\brobot\.set_speed\b', r'\brobot\.log\b']:
+                       r'\brobot\.set_speed\b', r'\brobot\.log\b',
+                       r'\brobot\.gripper\.open\b', r'\brobot\.gripper\.close\b',
+                       r'\bplan\.line\b', r'\bplan\.circle\b', r'\bplan\.arc\b',
+                       r'\bplan\.rectangle\b', r'\bplan\.rect\b', r'\bplan\.clear\b']:
                 self.rules.append((re.compile(bi), builtin_fmt))
             # Function calls
             self.rules.append((re.compile(r'\b[a-zA-Z_]\w*(?=\s*\()'), func_fmt))
@@ -76,19 +83,6 @@ class RobotSyntaxHighlighter(QtGui.QSyntaxHighlighter):
             self.rules.append((re.compile(r'"[^"]*"'), string_fmt))
             # Comments
             self.rules.append((re.compile(r'#.*$', re.MULTILINE), comment_fmt))
-
-        elif self.lang == "matlab":
-            # Matlab keywords
-            for kw in [r'\bfunction\b', r'\bend\b', r'\bif\b', r'\belse\b', r'\bfor\b',
-                        r'\bwhile\b', r'\breturn\b', r'\bpause\b', r'\bglobal\b', r'\bpersistent\b']:
-                self.rules.append((re.compile(kw, re.IGNORECASE), keyword_fmt))
-            # Builtin commands
-            for bi in [r'\bjoint\b', r'\bmove_xyz\b', r'\bhome\b', r'\bset_speed\b', r'\bclc\b']:
-                self.rules.append((re.compile(bi, re.IGNORECASE), builtin_fmt))
-            # Strings
-            self.rules.append((re.compile(r"'[^']*'"), string_fmt))
-            # Comments
-            self.rules.append((re.compile(r'%.*$', re.MULTILINE), comment_fmt))
 
         # Numbers (universal)
         self.rules.append((re.compile(r'\b-?\d+\.?\d*\b'), number_fmt))
@@ -213,6 +207,192 @@ class CodeEditor(QtWidgets.QPlainTextEdit):
         self.setExtraSelections(extra_selections)
 
 
+class PlanAPI:
+    """
+    Exposes CAD drawing tools to Python scripts, enabling 2D shape drawing on the
+    45-degree inclined reachable workspace plane using robot live-point tracing.
+    """
+    def __init__(self, panel):
+        self.panel = panel
+        self._current_pos_local = np.array([0.0, 0.0, 0.0]) # Pen location local to inclined workspace plane
+        self._current_live_point_world = None
+
+    def _get_workspace_plan(self):
+        """Helper to get the current auto-calculated workspace plan from the canvas."""
+        canvas = self.panel.mw.canvas
+        if canvas and hasattr(canvas, 'current_workspace_plan'):
+            return canvas.current_workspace_plan
+        return None
+
+    def _get_base_world_transform(self):
+        """Helper to get the robot base world transformation matrix."""
+        try:
+            base_world = np.array(self.panel.mw.robot.base_link.t_world, dtype=float).copy()
+            ratio = getattr(self.panel.mw.canvas, "grid_units_per_cm", 1.0) or 1.0
+            base_world[:3, 3] = base_world[:3, 3] / ratio
+            return base_world
+        except Exception:
+            return np.eye(4)
+
+    def _get_tcp_link(self):
+        """Helper to get the active robot toolpoint TCP link."""
+        return self.panel.mw._get_preferred_tcp_link()
+
+    def _get_live_point_world_cm(self, tcp_link):
+        """Return the current live point/TCP in world coordinates, expressed in cm."""
+        ratio = getattr(self.panel.mw.canvas, "grid_units_per_cm", 1.0) or 1.0
+        pos_world_internal, _, _ = self.panel.mw.get_link_tool_point(tcp_link)
+        return np.array(pos_world_internal, dtype=float) / ratio
+
+    def _move_local_pen(self, x_local, y_local, is_drawing=True):
+        """
+        Moves the robot's TCP toolpoint to a 2D local point on the inclined workspace plane.
+        If is_drawing is True, a permanent visual line actor is rendered between successive locations.
+        """
+        if not self.panel.is_running:
+            return False
+
+        ws_plan = self._get_workspace_plan()
+        if ws_plan is None:
+            self.panel.mw.log("⚠️ Plan warning: Workspace plane not calculated. Please assemble the robot and click 'Make Robo' first.")
+            return False
+
+        # Target coordinate on workspace plane (local Z is always 0.0)
+        target_local = np.array([x_local, y_local, 0.0])
+        if not ws_plan.validate_workspace_bounds(target_local):
+            self.panel.mw.log(
+                f"⚠️ Plan warning: CAD point ({x_local:.2f}, {y_local:.2f}) is outside the verified drawing plane."
+            )
+            return False
+
+        target_world = ws_plan.convert_local_to_world(target_local, self._get_base_world_transform())
+
+        tcp_link = self._get_tcp_link()
+        if not tcp_link:
+            self.panel.mw.log("⚠️ Plan warning: No active TCP toolpoint link found for drawing.")
+            return False
+
+        # Perform smooth synchronous IK movement to target world point
+        success, info = self.panel.mw._move_tcp_to_xyz(target_world[0], target_world[1], target_world[2], tcp_link, blocking=True)
+        
+        if success:
+            live_point_world = self._get_live_point_world_cm(tcp_link)
+            if is_drawing:
+                prev_world = self._current_live_point_world
+                if prev_world is None:
+                    prev_world = ws_plan.convert_local_to_world(self._current_pos_local, self._get_base_world_transform())
+                self.panel.mw.canvas.add_cad_line(prev_world, live_point_world)
+            self._current_live_point_world = live_point_world
+            self._current_pos_local = target_local
+            return True
+        else:
+            self.panel.mw.log(f"⚠️ Plan warning: Local coordinates ({x_local:.2f}, {y_local:.2f}) are outside robot's reach.")
+            return False
+
+    def line(self, x1, y1, x2, y2, steps=20):
+        """Draws a straight line from (x1, y1) to (x2, y2) local coordinates on the plan."""
+        if not self.panel.is_running:
+            return
+
+        ws_plan = self._get_workspace_plan()
+        if ws_plan is None:
+            self.panel.mw.log("⚠️ Plan warning: Workspace plane not calculated. Please assemble the robot and click 'Make Robo' first.")
+            return
+
+        # 1. Approach starting position without drawing
+        self._current_pos_local = np.array([x1, y1, 0.0])
+        self._move_local_pen(x1, y1, is_drawing=False)
+
+        # 2. Linear interpolate waypoints to draw
+        xs = np.linspace(x1, x2, steps)
+        ys = np.linspace(y1, y2, steps)
+        for x, y in zip(xs[1:], ys[1:]):
+            if not self.panel.is_running:
+                break
+            self._move_local_pen(x, y, is_drawing=True)
+
+    def circle(self, cx, cy, r, steps=40):
+        """Draws a complete circle with center (cx, cy) and radius r on the plan."""
+        if not self.panel.is_running:
+            return
+
+        ws_plan = self._get_workspace_plan()
+        if ws_plan is None:
+            self.panel.mw.log("⚠️ Plan warning: Workspace plane not calculated. Please assemble the robot and click 'Make Robo' first.")
+            return
+
+        # 1. Approach circle start coordinate
+        x0 = cx + r
+        y0 = cy
+        self._current_pos_local = np.array([x0, y0, 0.0])
+        self._move_local_pen(x0, y0, is_drawing=False)
+
+        # 2. Tracing the circular path
+        angles = np.linspace(0, 2 * np.pi, steps + 1)
+        for angle in angles[1:]:
+            if not self.panel.is_running:
+                break
+            x = cx + r * np.cos(angle)
+            y = cy + r * np.sin(angle)
+            self._move_local_pen(x, y, is_drawing=True)
+
+    def arc(self, cx, cy, r, start_ang, end_ang, steps=30):
+        """Draws a circular arc centered at (cx, cy) with radius r between start_ang and end_ang degrees."""
+        if not self.panel.is_running:
+            return
+
+        ws_plan = self._get_workspace_plan()
+        if ws_plan is None:
+            self.panel.mw.log("⚠️ Plan warning: Workspace plane not calculated. Please assemble the robot and click 'Make Robo' first.")
+            return
+
+        start_rad = np.radians(start_ang)
+        end_rad = np.radians(end_ang)
+
+        # 1. Approach arc start coordinate
+        x0 = cx + r * np.cos(start_rad)
+        y0 = cy + r * np.sin(start_rad)
+        self._current_pos_local = np.array([x0, y0, 0.0])
+        self._move_local_pen(x0, y0, is_drawing=False)
+
+        # 2. Tracing the arc
+        angles = np.linspace(start_rad, end_rad, steps + 1)
+        for angle in angles[1:]:
+            if not self.panel.is_running:
+                break
+            x = cx + r * np.cos(angle)
+            y = cy + r * np.sin(angle)
+            self._move_local_pen(x, y, is_drawing=True)
+
+    def rectangle(self, x, y, w, h):
+        """Draws a rectangular frame from bottom-left corner (x, y) with width w and height h."""
+        if not self.panel.is_running:
+            return
+
+        ws_plan = self._get_workspace_plan()
+        if ws_plan is None:
+            self.panel.mw.log("⚠️ Plan warning: Workspace plane not calculated. Please assemble the robot and click 'Make Robo' first.")
+            return
+
+        # Sequential tracing of 4 edges
+        self.line(x, y, x + w, y, steps=15)
+        self.line(x + w, y, x + w, y + h, steps=15)
+        self.line(x + w, y + h, x, y + h, steps=15)
+        self.line(x, y + h, x, y, steps=15)
+
+    def rect(self, x, y, w, h):
+        """Alias for rectangle."""
+        self.rectangle(x, y, w, h)
+
+    def clear(self):
+        """Clears all drawn CAD trajectories from the 3D canvas plotter."""
+        canvas = self.panel.mw.canvas
+        if canvas and hasattr(canvas, 'clear_cad_drawings'):
+            canvas.clear_cad_drawings()
+        self._current_live_point_world = None
+        self.panel.mw.log("🧹 CAD drawings cleared from inclined workspace plane.")
+
+
 class ProgramPanel(QtWidgets.QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -239,69 +419,31 @@ class ProgramPanel(QtWidgets.QWidget):
             ),
             "python": (
                 "# ============================================================\n"
-                "# E-labs Python Robot API - Professional Scripting\n"
-                "# Use 'robot' object to control the 3D simulation.\n"
+                "# E-Labs Python Robotics API\n"
+                "# The built-in elabs package controls the live simulation.\n"
                 "# \n"
-                "# MOVEMENT:\n"
-                "#   robot.move('JointName', angle)  - Smooth joint rotation\n"
-                "#   robot.move_xyz(x, y, z)         - Smooth Cartesian movement (IK)\n"
-                "#   robot.home()                    - Reset to zero position\n"
-                "#   robot.wait(seconds)             - Non-blocking delay\n"
-                "# \n"
-                "# QUERY STATE:\n"
-                "#   val = robot.get_joint('Name')   - Get current angle\n"
-                "#   pos = robot.get_tcp()           - Get end-effector [x,y,z]\n"
-                "#   names = robot.get_joint_names() - List of all joints\n"
-                "# \n"
-                "# UTILS:\n"
-                "#   robot.set_speed(%)              - Set animation speed\n"
-                "#   robot.log('message')            - Print to system console\n"
+                "# ROBOT MOVEMENT CONTROLS:\n"
+                "#   from elabs import Robot\n"
+                "#   robot.set_speed(percent)        - Set speed (0-100)\n"
+                "#   robot.home()                    - Reset robot to zero pose\n"
+                "#   robot.move_joint(name, angle)   - Move joint in degrees\n"
+                "#   robot.move_tcp(x, y, z)         - Move TCP/live point in cm\n"
+                "#   robot.gripper.open()/close()    - Control configured gripper\n"
                 "# ============================================================\n"
-                "import math\n"
                 "\n"
-                "robot.set_speed(80)\n"
-                "robot.log('Starting pick-and-place sequence...')\n"
+                "from elabs import Robot\n"
+                "\n"
+                "robot = Robot()\n"
+                "robot.set_speed(50)\n"
                 "robot.home()\n"
-                "robot.wait(0.5)\n"
-                "\n"
-                "# Move to specific coordinates\n"
-                "robot.move_xyz(10, 15, 20)\n"
-                "robot.wait(0.5)\n"
-                "\n"
-                "# Rotate specific joint\n"
-                "joints = robot.get_joint_names()\n"
-                "if joints:\n"
-                "    robot.move(joints[0], 45)\n"
-                "\n"
-                "robot.log('Sequence finished.')\n"
+                "robot.wait(1)\n"
+                "robot.move_joint('Shoulder', 45)\n"
+                "robot.wait(1)\n"
+                "robot.move_joint('Elbow', 30)\n"
+                "robot.wait(1)\n"
+                "robot.move_tcp(x=250, y=100, z=150)\n"
+                "robot.gripper.close()\n"
                 "robot.home()\n"
-            ),
-            "matlab": (
-                "% ============================================================\n"
-                "% E-labs MATLAB/Octave Notation Script\n"
-                "% \n"
-                "% Available commands:\n"
-                "%   joint('Name', angle);     - Smooth joint rotation\n"
-                "%   move_xyz(x, y, z);        - Smooth Cartesian IK\n"
-                "%   home();                   - Reset robot\n"
-                "%   pause(seconds);           - Delay\n"
-                "%   set_speed(percent);       - Set speed\n"
-                "%   clc;                      - Clear console\n"
-                "% ============================================================\n"
-                "\n"
-                "set_speed(70);\n"
-                "home();\n"
-                "pause(1.0);\n"
-                "\n"
-                "% Move End-Effector to Point\n"
-                "move_xyz(15, 0, 25);\n"
-                "pause(0.5);\n"
-                "\n"
-                "% Manual joint override\n"
-                "joint('Joint1', -30);\n"
-                "pause(0.5);\n"
-                "\n"
-                "home();\n"
             )
         }
 
@@ -390,7 +532,7 @@ class ProgramPanel(QtWidgets.QWidget):
         lang_layout.addWidget(lang_label)
 
         self.lang_btns = {}
-        for lang_key, display_name in [("command", "Command"), ("python", "Python"), ("matlab", "Matlab")]:
+        for lang_key, display_name in [("command", "Command"), ("python", "Python")]:
             btn = QtWidgets.QPushButton(display_name)
             btn.setCheckable(True)
             btn.setCursor(QtCore.Qt.PointingHandCursor)
@@ -463,8 +605,6 @@ class ProgramPanel(QtWidgets.QWidget):
 
         if self.current_lang == "python":
             self.run_python_code(code)
-        elif self.current_lang == "matlab":
-            self.run_matlab_code(code)
         else:
             # Standard "command" parsing
             for line in lines:
@@ -478,119 +618,23 @@ class ProgramPanel(QtWidgets.QWidget):
         self.mw.log(f"{self.current_lang.capitalize()} Finished.")
 
     def run_python_code(self, code):
-        """Executes Python code with a safe robot API."""
-        class RobotAPI:
-            def __init__(self, panel):
-                self.panel = panel
-            
-            def move(self, joint_name, angle):
-                """Moves a joint smoothly and waits for completion."""
-                if not self.panel.is_running: return
-                self.panel.mw.move_joint_animated(joint_name, angle, blocking=True)
-            
-            def move_xyz(self, x, y, z):
-                """Moves End-Effector to [x,y,z] via IK smoothly and waits."""
-                if not self.panel.is_running: return
-                tcp_link = self.panel.mw._get_preferred_tcp_link()
-                if tcp_link:
-                    self.panel.mw._move_tcp_to_xyz(x, y, z, tcp_link, blocking=True)
-            
-            def wait(self, seconds):
-                """Waits while keeping UI alive."""
-                if not self.panel.is_running: return
-                start = time.time()
-                while time.time() - start < seconds and self.panel.is_running:
-                    QtWidgets.QApplication.processEvents()
-                    time.sleep(0.01)
-            
-            def home(self):
-                """Smoothly returns all joints to zero."""
-                if not self.panel.is_running: return
-                joint_ids = list(self.panel.mw.robot.joints.keys())
-                child_names = [j.child_link.name for j in self.panel.mw.robot.joints.values() if j.child_link]
-                targets = [0.0] * len(joint_ids)
-                self.panel.mw._start_joint_animation(joint_ids, child_names, targets, blocking=True)
-            
-            def get_joint(self, name):
-                """Returns current joint angle."""
-                if name in self.panel.mw.robot.joints:
-                    return float(self.panel.mw.robot.joints[name].current_value)
-                return 0.0
-            
-            def get_joint_names(self):
-                """Returns list of all joint names."""
-                return list(self.panel.mw.robot.joints.keys())
-
-            def get_tcp(self):
-                """Returns end-effector [x,y,z] in CM."""
-                ratio = getattr(self.panel.mw.canvas, "grid_units_per_cm", 1.0)
-                tcp_link = self.panel.mw._get_preferred_tcp_link()
-                if tcp_link:
-                    pos, _, _ = self.panel.mw.get_link_tool_point(tcp_link)
-                    return (pos / ratio).tolist()
-                return [0.0, 0.0, 0.0]
-            
-            def set_speed(self, percent):
-                """Sets the animation speed (0-100)."""
-                self.panel.mw.on_speed_change(float(np.clip(percent, 0, 100)))
-            
-            def log(self, msg):
-                self.panel.mw.log(str(msg))
-            
-            def clear(self):
-                self.panel.mw.console.clear()
-
-
-        api = RobotAPI(self)
+        """Executes Python code with the built-in E-Labs robotics API."""
+        robot_api = Robot(self)
+        plan_api = PlanAPI(self)
         try:
-            # Execute with robot api available as 'robot'
-            exec(code, {"robot": api, "print": self.mw.log})
+            # Bind this panel so "from elabs import Robot" attaches to the live simulation.
+            with simulation_context(self):
+                exec(
+                    code,
+                    {
+                        "Robot": Robot,
+                        "robot": robot_api,
+                        "plan": plan_api,
+                        "print": self.mw.log,
+                    },
+                )
         except Exception as e:
             self.mw.log(f"Python Error: {e}")
-
-    def run_matlab_code(self, code):
-        """Simulates Matlab syntax execution."""
-        lines = code.splitlines()
-        for line in lines:
-            if not self.is_running: break
-            line = line.strip()
-            if not line or line.startswith("%"): continue
-
-            joint_match = re.match(r"joint\s*\(['\"](.+?)['\"]\s*,\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
-            move_xyz_match = re.match(r"move_xyz\s*\(\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*,\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
-            pause_match = re.match(r"pause\s*\((-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
-
-            if joint_match:
-                name = joint_match.group(1)
-                val = float(joint_match.group(2))
-                self.mw.move_joint_animated(name, val, blocking=True)
-            elif move_xyz_match:
-                x = float(move_xyz_match.group(1))
-                y = float(move_xyz_match.group(2))
-                z = float(move_xyz_match.group(3))
-                tcp_link = self.mw._get_preferred_tcp_link()
-                if tcp_link:
-                    self.mw._move_tcp_to_xyz(x, y, z, tcp_link, blocking=True)
-            elif pause_match:
-                val = float(pause_match.group(1))
-                start = time.time()
-                while time.time() - start < val and self.is_running:
-                    QtWidgets.QApplication.processEvents()
-                    time.sleep(0.01)
-            elif re.match(r"home\s*\(\s*\);?", line, re.IGNORECASE):
-                joint_ids = list(self.mw.robot.joints.keys())
-                child_names = [j.child_link.name for j in self.mw.robot.joints.values() if j.child_link]
-                targets = [0.0] * len(joint_ids)
-                self.mw._start_joint_animation(joint_ids, child_names, targets, blocking=True)
-            elif re.match(r"set_speed\s*\(\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE):
-                speed_match = re.match(r"set_speed\s*\(\s*(-?\d+\.?\d*)\s*\);?", line, re.IGNORECASE)
-                self.mw.on_speed_change(float(speed_match.group(1)))
-            elif re.match(r"clc\s*\(\s*\);?", line, re.IGNORECASE) or line.lower() == "clc":
-                self.mw.console.clear()
-            else:
-                self.mw.log(f"Matlab Parser: Skipping unknown line: {line}")
-
-
     def _move_tcp_to_xyz(self, x_cm, y_cm, z_cm):
         """Moves the current TCP to an XYZ target in centimeters using the robot IK solver."""
         if not self.mw.robot.joints:
@@ -660,8 +704,13 @@ class ProgramPanel(QtWidgets.QWidget):
                 self.mw.log(f"Speed set to {self.mw.current_speed}%")
 
             elif cmd == "HOME":
-                self.mw.reset_to_home()
+                self.mw.go_home_tcp()
                 QtWidgets.QApplication.processEvents()
                 
         except Exception as e:
             self.mw.log(f"Execution Error in line '{line}': {e}")
+
+
+
+
+

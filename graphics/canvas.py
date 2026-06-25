@@ -19,7 +19,10 @@ class RobotCanvas(QtWidgets.QWidget):
         
         # Premium Light Theme Environment
         self.plotter.set_background("white")
-        self.plotter.add_axes()
+        # Keep the XYZ coordinate bracket in the lower-left corner.
+        # PyVista 0.47.x uses the 'viewport' argument rather than 'position'.
+        self.plotter.add_axes(viewport=(0.0, 0.0, 0.25, 0.25))
+        self._camera_orientation_widget = self.plotter.add_camera_orientation_widget(animate=True)
         
         self.grid_units_per_cm = get_engine_units_per_cm()
         self.grid_cm_size = 1000.0    # 10m workspace
@@ -32,8 +35,14 @@ class RobotCanvas(QtWidgets.QWidget):
             pass
         
         self.actors = {} # Link name -> actor
+        self._waypoint_actors = {} # Waypoint name -> actor
+        self._traj_axes_actors = [] # Axes actors
+        self._traj_arrow_actors = [] # Arrow actors
         self.selected_name = None
         self.is_dragging = False
+        self.is_dragging_waypoint = False
+        self.dragged_waypoint_name = None
+        self.dragged_waypoint_idx = -1
         self.last_pos = None
         self.fixed_actors = set() # Set of actor names that cannot be picked or moved
         
@@ -50,8 +59,8 @@ class RobotCanvas(QtWidgets.QWidget):
         self.plotter.interactor.AddObserver("MouseWheelForwardEvent", self._on_wheel_forward)
         self.plotter.interactor.AddObserver("MouseWheelBackwardEvent", self._on_wheel_backward)
 
-        # 3D Orientation Cube (Standard Navigation)
-        self.plotter.add_camera_orientation_widget()
+        # Keep the viewport clean on startup. The camera orientation cube is
+        # part of the navigation UI, not scene geometry.
         
         # Initialize dynamic grid system
         self._init_custom_grids()
@@ -87,7 +96,30 @@ class RobotCanvas(QtWidgets.QWidget):
         self._last_live_point_hud = None
         self._last_live_point_marker = None
         self._workspace_actor_name = "robot_workspace_cloud"
-        self._live_point_marker_visible = True  # Toggle flag for the red dot
+        self._workspace_cloud_actor = None
+        self._workspace_surface_actor = None
+        self._workspace_sphere_actor = None
+        self._workspace_center_actor = None
+        self._workspace_ring_actors = []
+        self._workspace_infographic_actors = []
+        self._workspace_ghost_actors = []
+        self._workspace_cloud_points = None
+        self._workspace_cloud_visible = True
+        self._live_point_marker_visible = True  # Show TCP debug marker by default
+        self.current_workspace_plan = None
+        self._workspace_plane_actor = None
+
+    def _is_locked_actor(self, name):
+        if not name:
+            return False
+        if name in getattr(self, 'fixed_actors', set()):
+            return True
+        robot = getattr(self.window(), 'robot', None)
+        if robot and name in robot.links:
+            return bool(robot.links[name].parent_joint)
+        return False
+        self._workspace_plane_boundary_actor = None
+        self._workspace_plane_visible = True
         self.plotter.add_text(
             "LIVE POINT: X: 0.00, Y: 0.00, Z: 0.00 cm",
             position='upper_left',
@@ -472,29 +504,490 @@ class RobotCanvas(QtWidgets.QWidget):
         self.plotter.reset_camera(bounds=bounds)
         self.plotter.render()
 
-    def show_workspace_cloud(self, points):
-        """Render a sampled workspace point cloud for the current robot."""
-        try:
-            self.plotter.remove_actor(self._workspace_actor_name)
-        except Exception:
-            pass
+    def show_workspace_cloud(
+        self,
+        points,
+        center=None,
+        radius=None,
+        directional_reach=None,
+        robot=None,
+        ghost_configs=None,
+        tcp_link_name=None,
+    ):
+        """Render the self-collision-filtered reachable workspace in the 3D engine."""
+        for actor_name in (
+            self._workspace_actor_name,
+            "robot_workspace_cloud_points",
+            "robot_workspace_envelope",
+            "robot_workspace_sphere",
+            "robot_workspace_center",
+        ):
+            try:
+                self.plotter.remove_actor(actor_name)
+            except Exception:
+                pass
+        for actor in getattr(self, "_workspace_ring_actors", []):
+            try:
+                self.plotter.remove_actor(actor)
+            except Exception:
+                try:
+                    self.plotter.renderer.RemoveActor(actor)
+                except Exception:
+                    pass
+        for actor in getattr(self, "_workspace_infographic_actors", []):
+            try:
+                self.plotter.remove_actor(actor)
+            except Exception:
+                try:
+                    self.plotter.renderer.RemoveActor(actor)
+                except Exception:
+                    pass
+        for actor in getattr(self, "_workspace_ghost_actors", []):
+            try:
+                self.plotter.remove_actor(actor)
+            except Exception:
+                try:
+                    self.plotter.renderer.RemoveActor(actor)
+                except Exception:
+                    pass
+        self._workspace_ring_actors = []
+        self._workspace_infographic_actors = []
+        self._workspace_ghost_actors = []
+        self._workspace_cloud_actor = None
+        self._workspace_surface_actor = None
+        self._workspace_sphere_actor = None
+        self._workspace_center_actor = None
+        self._workspace_cloud_points = None
 
         if points is None or len(points) == 0:
             self.plotter.render()
             return
 
-        # Visual 'dots' removed as per user request, but data remains in robot model for functional use.
-        # cloud = pv.PolyData(np.array(points, dtype=float))
-        # self.plotter.add_mesh(
-        #     cloud,
-        #     color="#26a69a",
-        #     opacity=0.22,
-        #     point_size=8,
-        #     render_points_as_spheres=True,
-        #     name=self._workspace_actor_name,
-        #     pickable=False,
-        # )
+        self._workspace_cloud_points = np.array(points, dtype=float)
+        sphere_center = np.array(center, dtype=float) if center is not None else self._workspace_cloud_points.mean(axis=0)
+        if radius is None:
+            radius = float(np.max(np.linalg.norm(self._workspace_cloud_points - sphere_center, axis=1)))
+        radius = max(float(radius or 0.0), 8.0 * self.grid_units_per_cm)
+
+        # --- Build an accurate workspace envelope from joint-limit sampling ---
+        workspace_mesh = None
+
+        # Priority 1: Directional reach envelope (smooth, covers all directions)
+        if directional_reach is not None:
+            workspace_mesh = self._build_directional_workspace_mesh(sphere_center, directional_reach)
+
+        # Priority 2: Convex hull of the sampled reachable points
+        if workspace_mesh is None and len(self._workspace_cloud_points) >= 4:
+            try:
+                cloud = pv.PolyData(self._workspace_cloud_points)
+                workspace_mesh = cloud.delaunay_3d().extract_surface()
+            except Exception:
+                try:
+                    from scipy.spatial import ConvexHull
+                    hull = ConvexHull(self._workspace_cloud_points)
+                    hull_faces = []
+                    for simplex in hull.simplices:
+                        hull_faces.extend([3, simplex[0], simplex[1], simplex[2]])
+                    workspace_mesh = pv.PolyData(
+                        self._workspace_cloud_points, np.array(hull_faces, dtype=np.int_)
+                    )
+                except Exception:
+                    workspace_mesh = None
+
+        if workspace_mesh is not None:
+            try:
+                workspace_mesh = workspace_mesh.smooth(n_iter=60, relaxation_factor=0.08)
+            except Exception:
+                pass
+            self._workspace_sphere_actor = self.plotter.add_mesh(
+                workspace_mesh,
+                color="#ffe082",
+                opacity=0.24,
+                smooth_shading=True,
+                show_edges=False,
+                name="robot_workspace_sphere",
+                pickable=False,
+            )
+        else:
+            # Priority 3: Fallback bounding sphere (least accurate)
+            sphere = pv.Sphere(
+                radius=radius,
+                center=sphere_center,
+                theta_resolution=160,
+                phi_resolution=96,
+            )
+            self._workspace_sphere_actor = self.plotter.add_mesh(
+                sphere,
+                color="#ffe082",
+                opacity=0.24,
+                smooth_shading=True,
+                show_edges=False,
+                name="robot_workspace_sphere",
+                pickable=False,
+            )
+        self.set_workspace_cloud_visible(self._workspace_cloud_visible, render=False)
         self.plotter.render()
+
+    def _workspace_add_actor(self, actor):
+        self._workspace_infographic_actors.append(actor)
+        return actor
+
+    def _workspace_text(self, text, point, color="#263238", font_size=13):
+        txt_actor = vtkRenderingCore.vtkBillboardTextActor3D()
+        txt_actor.SetInput(str(text))
+        txt_actor.SetPosition(float(point[0]), float(point[1]), float(point[2]))
+        prop = txt_actor.GetTextProperty()
+        prop.SetFontSize(int(font_size))
+        prop.SetColor(list(pv.Color(color))[:3])
+        prop.SetBold(True)
+        prop.SetFontFamilyToArial()
+        prop.SetJustificationToCentered()
+        txt_actor.SetPickable(False)
+        self.plotter.renderer.AddActor(txt_actor)
+        self._workspace_infographic_actors.append(txt_actor)
+        return txt_actor
+
+    def _workspace_callout(self, text, anchor, label_pos, color="#263238", font_size=13):
+        line = pv.Line(anchor, label_pos)
+        self._workspace_add_actor(
+            self.plotter.add_mesh(
+                line,
+                color=color,
+                line_width=2,
+                name=f"workspace_callout_{len(self._workspace_infographic_actors)}",
+                pickable=False,
+                lighting=False,
+            )
+        )
+        return self._workspace_text(text, label_pos, color=color, font_size=font_size)
+
+    def _draw_workspace_infographic(self, center, radius, points=None, robot=None, ghost_configs=None, tcp_link_name=None):
+        center = np.array(center, dtype=float)
+        radius = float(radius)
+        if radius <= 1e-9:
+            return
+
+        dead_radius = max(radius * 0.14, 2.0 * self.grid_units_per_cm)
+        dexterous_radius = max(dead_radius * 1.35, radius * 0.42)
+
+        dead_zone = pv.Sphere(radius=dead_radius, center=center, theta_resolution=96, phi_resolution=48)
+        self._workspace_add_actor(
+            self.plotter.add_mesh(
+                dead_zone,
+                color="#e53935",
+                opacity=0.18,
+                smooth_shading=True,
+                name="workspace_dead_zone",
+                pickable=False,
+            )
+        )
+
+        dexterous = pv.Sphere(radius=dexterous_radius, center=center, theta_resolution=128, phi_resolution=72)
+        self._workspace_add_actor(
+            self.plotter.add_mesh(
+                dexterous,
+                color="#29b6f6",
+                opacity=0.12,
+                smooth_shading=True,
+                name="workspace_dexterous_zone",
+                pickable=False,
+            )
+        )
+
+        x_tip = center + np.array([radius, 0.0, 0.0])
+        radius_arrow = pv.Arrow(
+            start=center,
+            direction=np.array([radius, 0.0, 0.0]),
+            tip_length=0.08,
+            tip_radius=max(radius * 0.012, 0.25 * self.grid_units_per_cm),
+            shaft_radius=max(radius * 0.004, 0.08 * self.grid_units_per_cm),
+            scale=1.0,
+        )
+        self._workspace_add_actor(
+            self.plotter.add_mesh(
+                radius_arrow,
+                color="#5d4037",
+                name="workspace_radius_arrow",
+                pickable=False,
+                lighting=False,
+            )
+        )
+
+        # End-effector path is a clean circular arc on the visible shell.
+        theta = np.linspace(np.radians(205.0), np.radians(325.0), 90)
+        z = center[2] + radius * 0.22
+        path_r = radius * 0.78
+        path_pts = np.column_stack([
+            center[0] + path_r * np.cos(theta),
+            center[1] + path_r * np.sin(theta),
+            np.full_like(theta, z),
+        ])
+        path_actor = self.plotter.add_mesh(
+            self._ring_polyline(path_pts),
+            color="#00897b",
+            line_width=5,
+            name="workspace_ee_path",
+            pickable=False,
+            lighting=False,
+        )
+        self._workspace_add_actor(path_actor)
+        if len(path_pts) >= 2:
+            direction = path_pts[-1] - path_pts[-2]
+            n = np.linalg.norm(direction)
+            if n > 1e-9:
+                arrow = pv.Arrow(
+                    start=path_pts[-2],
+                    direction=direction / n,
+                    scale=max(radius * 0.10, 2.0 * self.grid_units_per_cm),
+                )
+                self._workspace_add_actor(
+                    self.plotter.add_mesh(
+                        arrow,
+                        color="#00897b",
+                        name="workspace_ee_path_arrow",
+                        pickable=False,
+                        lighting=False,
+                    )
+                )
+
+        label_lift = np.array([0.0, 0.0, radius * 0.12])
+        self._workspace_callout(
+            "Reachable Workspace",
+            center + np.array([radius * 0.35, radius * 0.78, radius * 0.25]),
+            center + np.array([radius * 0.72, radius * 1.10, radius * 0.58]),
+            color="#8a6d00",
+            font_size=14,
+        )
+        self._workspace_callout(
+            "Dexterous Workspace",
+            center + np.array([dexterous_radius * 0.55, 0.0, dexterous_radius * 0.55]),
+            center + np.array([radius * 0.18, -radius * 1.00, radius * 0.48]),
+            color="#0277bd",
+            font_size=13,
+        )
+        self._workspace_callout(
+            "Dead Zone",
+            center + np.array([dead_radius * 0.8, 0.0, 0.0]),
+            center + np.array([-radius * 0.62, -radius * 0.70, radius * 0.12]),
+            color="#c62828",
+            font_size=13,
+        )
+        self._workspace_callout(
+            f"Maximum Reach Radius: {radius / max(self.grid_units_per_cm, 1e-9):.1f} cm",
+            x_tip,
+            center + np.array([radius * 1.22, 0.0, radius * 0.18]) + label_lift,
+            color="#5d4037",
+            font_size=13,
+        )
+        self._workspace_callout(
+            "End Effector Path",
+            path_pts[len(path_pts) // 2],
+            center + np.array([-radius * 1.10, radius * 0.40, radius * 0.42]),
+            color="#00695c",
+            font_size=13,
+        )
+
+        self._draw_workspace_mini_diagrams(center, radius)
+        if robot is not None:
+            self._draw_workspace_joint_indicators(robot, radius)
+            self._draw_workspace_ghost_poses(robot, ghost_configs, tcp_link_name=tcp_link_name)
+
+    def _draw_workspace_mini_diagrams(self, center, radius):
+        base = np.array(center, dtype=float) + np.array([radius * 1.05, radius * 0.95, radius * 0.88])
+        mini_r = radius * 0.16
+        theta = np.linspace(0.0, 2.0 * np.pi, 121)
+
+        top_pts = base + np.column_stack([mini_r * np.cos(theta), mini_r * np.sin(theta), np.zeros_like(theta)])
+        side_base = base + np.array([0.0, 0.0, -mini_r * 2.45])
+        side_pts = side_base + np.column_stack([mini_r * np.cos(theta), np.zeros_like(theta), mini_r * np.sin(theta)])
+        for name, pts in (("workspace_top_view_ring", top_pts), ("workspace_side_view_ring", side_pts)):
+            self._workspace_add_actor(
+                self.plotter.add_mesh(
+                    self._ring_polyline(pts),
+                    color="#455a64",
+                    line_width=2,
+                    name=name,
+                    pickable=False,
+                    lighting=False,
+                )
+            )
+        self._workspace_text("Top View", base + np.array([0.0, 0.0, mini_r * 0.24]), color="#263238", font_size=11)
+        self._workspace_text("Side View", side_base + np.array([0.0, 0.0, mini_r * 1.22]), color="#263238", font_size=11)
+
+    def _draw_workspace_joint_indicators(self, robot, radius):
+        ring_radius = max(radius * 0.035, 1.2 * self.grid_units_per_cm)
+        theta = np.linspace(0.0, 2.0 * np.pi, 80)
+        for idx, joint in enumerate(list(robot.joints.values())[:6]):
+            try:
+                parent_tf = np.array(joint.parent_link.t_world, dtype=float)
+                origin = (parent_tf @ np.append(joint.origin, 1.0))[:3]
+                axis = parent_tf[:3, :3] @ np.array(joint.axis, dtype=float)
+                axis = axis / max(np.linalg.norm(axis), 1e-9)
+                helper = np.array([1.0, 0.0, 0.0])
+                if abs(np.dot(helper, axis)) > 0.85:
+                    helper = np.array([0.0, 1.0, 0.0])
+                u = np.cross(axis, helper)
+                u = u / max(np.linalg.norm(u), 1e-9)
+                v = np.cross(axis, u)
+                pts = origin + ring_radius * (np.cos(theta)[:, None] * u + np.sin(theta)[:, None] * v)
+                actor = self.plotter.add_mesh(
+                    self._ring_polyline(pts),
+                    color="#d32f2f",
+                    line_width=2,
+                    name=f"workspace_joint_rotation_{idx}",
+                    pickable=False,
+                    lighting=False,
+                )
+                self._workspace_add_actor(actor)
+            except Exception:
+                continue
+
+    def _draw_workspace_ghost_poses(self, robot, ghost_configs, tcp_link_name=None):
+        if ghost_configs is None or len(ghost_configs) == 0:
+            return
+
+        tcp_link = robot.links.get(tcp_link_name) if tcp_link_name else None
+        chain = robot.get_kinematic_chain(tcp_link) if tcp_link is not None else list(robot.joints.values())
+        if not chain:
+            return
+
+        configs = np.array(ghost_configs, dtype=float)
+        if configs.ndim != 2:
+            return
+
+        pick_indices = np.linspace(0, len(configs) - 1, num=min(4, len(configs)), dtype=int)
+        old_values = {name: joint.current_value for name, joint in robot.joints.items()}
+        try:
+            for pose_idx, cfg_idx in enumerate(pick_indices):
+                cfg = configs[cfg_idx]
+                for joint_idx, joint in enumerate(chain):
+                    if joint_idx < len(cfg):
+                        joint.current_value = float(np.clip(cfg[joint_idx], joint.min_limit, joint.max_limit))
+                robot.update_kinematics()
+                for link in robot.links.values():
+                    mesh = getattr(link, "mesh", None)
+                    if mesh is None or link.name not in self.actors:
+                        continue
+                    try:
+                        ghost_actor = self.plotter.add_mesh(
+                            pv.wrap(mesh).copy(),
+                            color="#78909c",
+                            opacity=0.13,
+                            name=f"workspace_pose_ghost_{pose_idx}_{link.name}",
+                            user_matrix=np.array(link.t_world, dtype=float),
+                            pickable=False,
+                            lighting=True,
+                        )
+                        self._workspace_ghost_actors.append(ghost_actor)
+                    except Exception:
+                        continue
+        finally:
+            for name, value in old_values.items():
+                if name in robot.joints:
+                    robot.joints[name].current_value = value
+            robot.update_kinematics()
+
+    def _ring_polyline(self, points):
+        poly = pv.PolyData(np.array(points, dtype=float))
+        line = []
+        for idx in range(len(points) - 1):
+            line.extend([2, idx, idx + 1])
+        poly.lines = np.array(line, dtype=np.int_)
+        return poly
+
+    def _draw_workspace_sphere_rings(self, center, radius):
+        """Add clean circular latitude/longitude lines so the workspace reads as a sphere."""
+        center = np.array(center, dtype=float)
+        radius = float(radius)
+        if radius <= 1e-9:
+            return
+
+        ring_color = "#b8860b"
+        steps = 241
+        theta = np.linspace(0.0, 2.0 * np.pi, steps)
+
+        def add_ring(points, name):
+            actor = self.plotter.add_mesh(
+                self._ring_polyline(points),
+                color=ring_color,
+                line_width=2,
+                name=name,
+                pickable=False,
+                lighting=False,
+            )
+            self._workspace_ring_actors.append(actor)
+
+        # Three great circles.
+        add_ring(center + np.column_stack([radius * np.cos(theta), radius * np.sin(theta), np.zeros_like(theta)]), "robot_workspace_ring_xy")
+        add_ring(center + np.column_stack([radius * np.cos(theta), np.zeros_like(theta), radius * np.sin(theta)]), "robot_workspace_ring_xz")
+        add_ring(center + np.column_stack([np.zeros_like(theta), radius * np.cos(theta), radius * np.sin(theta)]), "robot_workspace_ring_yz")
+
+        # Latitude circles make the pattern visibly circular from oblique views.
+        for idx, z_frac in enumerate((-0.5, 0.5)):
+            z = radius * z_frac
+            r_xy = radius * np.sqrt(max(0.0, 1.0 - z_frac * z_frac))
+            pts = center + np.column_stack([r_xy * np.cos(theta), r_xy * np.sin(theta), np.full_like(theta, z)])
+            add_ring(pts, f"robot_workspace_ring_lat_{idx}")
+
+    def _build_directional_workspace_mesh(self, center, directional_reach):
+        if not directional_reach or not directional_reach.get("ok"):
+            return None
+
+        samples = directional_reach.get("samples", [])
+        azimuth_steps = int(directional_reach.get("azimuth_steps", 0) or 0)
+        elevation_steps = int(directional_reach.get("elevation_steps", 0) or 0)
+        if azimuth_steps < 3 or elevation_steps < 2 or len(samples) < azimuth_steps * elevation_steps:
+            return None
+
+        pts = []
+        center = np.array(center, dtype=float)
+        for sample in samples[: azimuth_steps * elevation_steps]:
+            direction = np.array(sample.get("direction", [0.0, 0.0, 1.0]), dtype=float)
+            norm = np.linalg.norm(direction)
+            if norm <= 1e-9:
+                direction = np.array([0.0, 0.0, 1.0], dtype=float)
+            else:
+                direction = direction / norm
+            reach_radius = max(float(sample.get("reach_radius", 0.0) or 0.0), 0.0)
+            pts.append(center + direction * reach_radius)
+
+        faces = []
+        for elev_idx in range(elevation_steps - 1):
+            row = elev_idx * azimuth_steps
+            next_row = (elev_idx + 1) * azimuth_steps
+            for az_idx in range(azimuth_steps):
+                a = row + az_idx
+                b = row + ((az_idx + 1) % azimuth_steps)
+                c = next_row + az_idx
+                d = next_row + ((az_idx + 1) % azimuth_steps)
+                faces.extend([3, a, c, b, 3, b, c, d])
+
+        mesh = pv.PolyData(np.array(pts, dtype=float), np.array(faces, dtype=np.int_))
+        try:
+            return mesh.clean(tolerance=1e-6)
+        except Exception:
+            return mesh
+
+    def set_workspace_cloud_visible(self, visible, render=True):
+        """Show or hide the reachable workspace envelope."""
+        self._workspace_cloud_visible = bool(visible)
+        for actor in (
+            getattr(self, "_workspace_sphere_actor", None),
+            getattr(self, "_workspace_surface_actor", None),
+            getattr(self, "_workspace_cloud_actor", None),
+            getattr(self, "_workspace_center_actor", None),
+            *getattr(self, "_workspace_ring_actors", []),
+            *getattr(self, "_workspace_infographic_actors", []),
+            *getattr(self, "_workspace_ghost_actors", []),
+        ):
+            if actor is not None:
+                try:
+                    actor.SetVisibility(1 if self._workspace_cloud_visible else 0)
+                except Exception:
+                    pass
+        if render:
+            self.plotter.render()
+        return self._workspace_cloud_visible
 
     def focus_on_robot(self, robot):
         """Frames the full robot using mesh data transformed into world space."""
@@ -779,8 +1272,13 @@ class RobotCanvas(QtWidgets.QWidget):
         
         # --- POINT PICKING MODE (JOINT ORIGIN) ---
         if hasattr(self, 'picking_point') and self.picking_point:
-            self.picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
-            picked_pos = self.picker.GetPickPosition()
+            self.cell_picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+            picked_actor = self.cell_picker.GetActor()
+            if picked_actor:
+                picked_pos = self.cell_picker.GetPickPosition()
+            else:
+                self.picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
+                picked_pos = self.picker.GetPickPosition()
             
             # Use picked position (even if on grid/empty space, though usually on object)
             if self.on_point_picked_callback:
@@ -819,6 +1317,23 @@ class RobotCanvas(QtWidgets.QWidget):
         # Check if we hit an actor
         self.picker.Pick(click_pos[0], click_pos[1], 0, self.plotter.renderer)
         actor = self.picker.GetActor()
+
+        # Check if we clicked on a waypoint sphere!
+        clicked_wp_name = None
+        if hasattr(self, '_waypoint_actors'):
+            for name, a in self._waypoint_actors.items():
+                if a == actor:
+                    clicked_wp_name = name
+                    break
+        
+        if clicked_wp_name:
+            self.is_dragging_waypoint = True
+            self.dragged_waypoint_name = clicked_wp_name
+            self.dragged_waypoint_idx = int(clicked_wp_name.split("_")[1])
+            self.last_pos = click_pos
+            actor.GetProperty().SetColor([0.9, 0.1, 0.4]) # Highlight pink
+            self.plotter.render()
+            return # Block other camera interactions!
 
         # CASE 1: We are already dragging something
         if self.is_dragging:
@@ -883,7 +1398,7 @@ class RobotCanvas(QtWidgets.QWidget):
                     link = robot.links[clicked_name]
                     
                     # Check 1: Jointed (has a parent joint)
-                    if link.parent_joint:
+                    if self._is_locked_actor(clicked_name):
                         self.mw_log(f"\u26a0 Locked: '{clicked_name}' is jointed. Remove the joint first to move freely.")
                         self.select_actor(clicked_name) # Select it visually
                         self.plotter.interactor.GetInteractorStyle().OnLeftButtonDown() # Allow camera rotate
@@ -959,6 +1474,16 @@ class RobotCanvas(QtWidgets.QWidget):
         self.plotter.interactor.GetInteractorStyle().OnLeftButtonDown()
 
     def _on_left_up(self, obj, event):
+        if getattr(self, 'is_dragging_waypoint', False):
+            self.is_dragging_waypoint = False
+            if hasattr(self, 'dragged_waypoint_name') and hasattr(self, '_waypoint_actors') and self.dragged_waypoint_name in self._waypoint_actors:
+                # restore color to royal blue
+                self._waypoint_actors[self.dragged_waypoint_name].GetProperty().SetColor([30/255.0, 136/255.0, 229/255.0])
+            self.plotter.render()
+            if hasattr(self.window(), 'path_tab'):
+                self.window().path_tab.on_waypoint_drag_finished()
+            return
+            
         # Pass through to default interactor to finish camera rotation
         self.plotter.interactor.GetInteractorStyle().OnLeftButtonUp()
         
@@ -981,7 +1506,67 @@ class RobotCanvas(QtWidgets.QWidget):
         self.plotter.interactor.GetInteractorStyle().OnRightButtonDown()
 
     def _on_mouse_move(self, obj, event):
+        if getattr(self, 'is_dragging_waypoint', False) and hasattr(self, 'dragged_waypoint_name'):
+            curr_pos = self.plotter.interactor.GetEventPosition()
+            if self.last_pos:
+                dx = curr_pos[0] - self.last_pos[0]
+                dy = curr_pos[1] - self.last_pos[1]
+                
+                actor = self._waypoint_actors[self.dragged_waypoint_name]
+                camera = self.plotter.camera
+                window_size = self.plotter.render_window.GetSize()
+                view_angle = np.radians(camera.GetViewAngle())
+                
+                dist = np.linalg.norm(np.array(camera.GetPosition()) - np.array(actor.GetCenter()))
+                world_height = 2.0 * dist * np.tan(view_angle / 2.0)
+                scale = world_height / window_size[1]
+                
+                view_up = np.array(camera.GetViewUp())
+                view_up /= (np.linalg.norm(view_up) + 1e-6)
+                view_dir = np.array(camera.GetDirectionOfProjection())
+                side = np.cross(view_dir, view_up)
+                side /= (np.linalg.norm(side) + 1e-6)
+                
+                move_vector = (side * dx + view_up * dy) * scale
+                try:
+                    actor.AddPosition(move_vector[0], move_vector[1], move_vector[2])
+                except Exception:
+                    pass
+                
+                if self.current_workspace_plan:
+                    try:
+                        base_world = self.window().robot.base_link.t_world
+                    except Exception:
+                        base_world = np.eye(4)
+                        
+                    t_ws_world = self.current_workspace_plan.get_workspace_to_world_transform(base_world)
+                    inv_r = t_ws_world[:3, :3].T
+                    local_move = inv_r @ (move_vector / self.grid_units_per_cm)
+                    
+                    idx = self.dragged_waypoint_idx
+                    if hasattr(self.window(), 'path_tab'):
+                        pt_tab = self.window().path_tab
+                        curr_pt = pt_tab.get_waypoint_coords(idx)
+                        if curr_pt is not None:
+                            new_pt = curr_pt + local_move
+                            new_pt[2] = curr_pt[2] # Lock Z height
+                            
+                            if hasattr(pt_tab, 'snap_checkbox') and pt_tab.snap_checkbox.isChecked():
+                                grid_size = self.current_workspace_plan.grid_size
+                                new_pt[0] = round(new_pt[0] / grid_size) * grid_size
+                                new_pt[1] = round(new_pt[1] / grid_size) * grid_size
+                                
+                            pt_tab.update_waypoint_coords(idx, new_pt, fast_drag=True)
+                self.last_pos = curr_pos
+                self.plotter.render()
+            return
+
         if self.is_dragging and self.selected_name:
+            if self._is_locked_actor(self.selected_name):
+                self.is_dragging = False
+                self.last_pos = None
+                return
+
             curr_pos = self.plotter.interactor.GetEventPosition()
             if self.last_pos:
                 # Calculate mouse delta in pixels
@@ -1110,7 +1695,7 @@ class RobotCanvas(QtWidgets.QWidget):
 
     def set_actor_color(self, name, color):
         if name in self.actors:
-            self.actors[name].GetProperty().SetColor(pv.Color(color))
+            self.actors[name].GetProperty().SetColor(list(pv.Color(color))[:3])
             self.plotter.render()
 
     def select_actor(self, name):
@@ -1202,7 +1787,7 @@ class RobotCanvas(QtWidgets.QWidget):
             txt_actor.SetInput(label)
             txt_actor.SetPosition(mid[0], mid[1], mid[2])
             txt_actor.GetTextProperty().SetFontSize(12)
-            txt_actor.GetTextProperty().SetColor(pv.Color(color))
+            txt_actor.GetTextProperty().SetColor(list(pv.Color(color))[:3])
             txt_actor.GetTextProperty().SetBold(True)
             txt_actor.GetTextProperty().SetFontFamilyToArial()
             txt_actor.GetTextProperty().SetJustificationToCentered()
@@ -1214,12 +1799,19 @@ class RobotCanvas(QtWidgets.QWidget):
             pass
 
     def update_hud_coords(self, x, y, z, render=True):
-        """Updates the Live Point HUD text on the 3D screen."""
-        rounded = (round(float(x), 2), round(float(y), 2), round(float(z), 2))
+        """Updates the Live Point HUD text on the 3D screen.
+        
+        Coordinates (x, y, z) are expected in centimeters and are displayed
+        with one decimal place for a cleaner on-screen readout.
+        """
+        # Cache with full precision to catch actual coordinate changes
+        rounded = (float(x), float(y), float(z))
         if self._last_live_point_hud == rounded:
             return
         self._last_live_point_hud = rounded
-        text = f"LIVE POINT: X: {x:.2f}, Y: {y:.2f}, Z: {z:.2f} cm"
+        
+        # Display with one decimal precision on screen.
+        text = f"LIVE POINT: X: {x:.1f}, Y: {y:.1f}, Z: {z:.1f} cm"
         self.plotter.add_text(
             text, 
             position='upper_left', 
@@ -1239,10 +1831,11 @@ class RobotCanvas(QtWidgets.QWidget):
         """
         if not getattr(self, '_live_point_marker_visible', True):
             # Ensure the actor is hidden while the toggle is off
-            try:
-                self.plotter.remove_actor("live_point_marker")
-            except Exception:
-                pass
+            if "live_point_marker" in self.plotter.renderer.actors:
+                try:
+                    self.plotter.remove_actor("live_point_marker")
+                except Exception:
+                    pass
             return
 
         point_world = np.array(point_world, dtype=float)
@@ -1787,3 +2380,845 @@ class RobotCanvas(QtWidgets.QWidget):
     def clear_rotation_discs(self):
         """Removes rotation disc overlays from the scene."""
         pass
+
+    def show_workspace_planner(self, workspace_plan):
+        """
+        Visualizes the 2D workspace boundary, safe margin rectangle, light grid,
+        center origin marker, and coordinate axis labels.
+        """
+        self.clear_workspace_planner()
+        self.current_workspace_plan = workspace_plan
+        return
+
+    def set_workspace_planner_visibility(self, visible):
+        """Toggle the visibility of all workspace-related actors and labels."""
+        self.workspace_visible = bool(visible)
+        
+        actors = [
+            getattr(self, "_ws_boundary_actor", None),
+            getattr(self, "_ws_safe_boundary_actor", None),
+            getattr(self, "_ws_grid_actor", None),
+            getattr(self, "_ws_origin_actor", None),
+        ]
+        
+        for actor in actors:
+            if actor is not None:
+                try:
+                    actor.SetVisibility(1 if self.workspace_visible else 0)
+                except Exception:
+                    pass
+                    
+        if hasattr(self, "_workspace_label_actors"):
+            for actor in self._workspace_label_actors:
+                if actor is not None:
+                    try:
+                        actor.SetVisibility(1 if self.workspace_visible else 0)
+                    except Exception:
+                        pass
+                        
+        self.plotter.render()
+
+    def clear_workspace_planner(self):
+        """Remove all workspace-related actors and labels."""
+        self.current_workspace_plan = None
+        actors_to_remove = ["ws_boundary", "ws_safe_boundary", "ws_grid", "ws_origin_marker"]
+        for name in actors_to_remove:
+            try:
+                self.plotter.remove_actor(name)
+            except Exception:
+                pass
+        
+        if hasattr(self, "_workspace_label_actors"):
+            for actor in self._workspace_label_actors:
+                try:
+                    self.plotter.renderer.RemoveActor(actor)
+                except Exception:
+                    pass
+            self._workspace_label_actors = []
+            
+        self.plotter.render()
+
+    def draw_trajectory_preview(self, trajectory, vis_mode="Geometry", show_axes=False, show_arrows=False):
+        """
+        Draws the 2D/3D trajectory path preview with advanced visual heatmaps and overlays.
+        """
+        return
+
+        self.clear_trajectory_preview()
+
+        if self.current_workspace_plan is None or trajectory is None or len(trajectory.points) == 0:
+            return
+
+        # Fast-path optimization during interactive dragging to maintain buttery 60 FPS
+        if getattr(self, "is_dragging_waypoint", False):
+            vis_mode = "Geometry"
+            show_axes = False
+            show_arrows = False
+
+        try:
+            base_world_transform = self.window().robot.base_link.t_world
+        except Exception:
+            base_world_transform = np.eye(4)
+
+        t_ws_world = self.current_workspace_plan.get_workspace_to_world_transform(base_world_transform)
+
+        pts_local = np.array(trajectory.points, dtype=float)
+        pts_hom = np.hstack([pts_local, np.ones((len(pts_local), 1))])
+        pts_world = (pts_hom @ t_ws_world.T)[:, :3]
+        pts_world_scaled = pts_world * self.grid_units_per_cm
+
+        n_pts = len(pts_world_scaled)
+        if n_pts < 2:
+            return
+
+        # 1. Draw line based on mode
+        if vis_mode == "Geometry" or vis_mode == "Reachability":
+            # Simple blue line
+            line_mesh = pv.MultipleLines(points=pts_world_scaled)
+            self._traj_line_actor = self.plotter.add_mesh(
+                line_mesh,
+                color="#1e88e5",  # Royal Blue
+                line_width=3,
+                name="traj_line",
+                pickable=False,
+                lighting=False
+            )
+        elif vis_mode in ["Velocity Heatmap", "Acceleration Heatmap", "Curvature Heatmap"]:
+            # Draw line with colormap gradient
+            poly = pv.PolyData()
+            poly.points = pts_world_scaled
+            cells = np.full((n_pts - 1, 3), 2, dtype=np.int_)
+            cells[:, 1] = np.arange(0, n_pts - 1)
+            cells[:, 2] = np.arange(1, n_pts)
+            poly.lines = cells
+
+            if vis_mode == "Velocity Heatmap":
+                # Compute linear velocity magnitudes
+                scalars = np.linalg.norm(trajectory.velocities, axis=1)
+                cmap = "viridis"
+            elif vis_mode == "Acceleration Heatmap":
+                # Compute acceleration magnitudes
+                scalars = np.linalg.norm(trajectory.accelerations, axis=1)
+                cmap = "coolwarm"
+            else: # Curvature
+                # Compute local curvature
+                scalars = np.zeros(n_pts)
+                diffs = np.diff(pts_world_scaled, axis=0)
+                ds = np.linalg.norm(diffs, axis=1)
+                ds[ds < 1e-5] = 1.0
+                tangents = diffs / ds[:, np.newaxis]
+                for i in range(1, n_pts - 1):
+                    dtangent = tangents[i] - tangents[i-1]
+                    mean_ds = 0.5 * (ds[i] + ds[i-1])
+                    scalars[i] = np.linalg.norm(dtangent) / mean_ds
+                scalars[0] = scalars[1]
+                scalars[-1] = scalars[-2]
+                cmap = "inferno"
+
+            # Add mesh with scalar colors
+            self._traj_line_actor = self.plotter.add_mesh(
+                poly,
+                scalars=scalars,
+                cmap=cmap,
+                line_width=4,
+                name="traj_line",
+                pickable=False,
+                lighting=False
+            )
+
+        # 2. Draw reachability spheres if selected
+        if vis_mode == "Reachability":
+            reachable_flags = trajectory.reachable_flags
+            if not reachable_flags:
+                reachable_flags = [True] * n_pts
+
+            reach_indices = [i for i, r in enumerate(reachable_flags) if r]
+            unreach_indices = [i for i, r in enumerate(reachable_flags) if not r]
+
+            if reach_indices:
+                reach_pts = pts_world_scaled[reach_indices]
+                reach_poly = pv.PolyData(reach_pts)
+                reach_spheres = reach_poly.glyph(geom=pv.Sphere(radius=0.55 * self.grid_units_per_cm))
+                self._traj_reach_actor = self.plotter.add_mesh(
+                    reach_spheres,
+                    color="#4caf50",  # Green
+                    name="traj_reach_pts",
+                    pickable=False,
+                    lighting=True
+                )
+
+            if unreach_indices:
+                unreach_pts = pts_world_scaled[unreach_indices]
+                unreach_poly = pv.PolyData(unreach_pts)
+                unreach_spheres = unreach_poly.glyph(geom=pv.Sphere(radius=0.55 * self.grid_units_per_cm))
+                self._traj_unreach_actor = self.plotter.add_mesh(
+                    unreach_spheres,
+                    color="#f44336",  # Red
+                    name="traj_unreach_pts",
+                    pickable=False,
+                    lighting=True
+                )
+
+        # 4. Draw coordinate axes overlays
+        if show_axes:
+            step = max(1, n_pts // 15)
+            for i in range(0, n_pts, step):
+                pt = pts_world_scaled[i]
+                rot = trajectory.orientations[i]
+                rot_world = t_ws_world[:3, :3] @ rot
+                
+                axis_len = 4.0 * self.grid_units_per_cm
+                x_end = pt + rot_world[:, 0] * axis_len
+                y_end = pt + rot_world[:, 1] * axis_len
+                z_end = pt + rot_world[:, 2] * axis_len
+                
+                ax = self.plotter.add_mesh(pv.Line(pt, x_end), color="red", line_width=2, name=f"traj_ax_{i}_x")
+                self._traj_axes_actors.append(ax)
+                ay = self.plotter.add_mesh(pv.Line(pt, y_end), color="green", line_width=2, name=f"traj_ax_{i}_y")
+                self._traj_axes_actors.append(ay)
+                az = self.plotter.add_mesh(pv.Line(pt, z_end), color="blue", line_width=2, name=f"traj_ax_{i}_z")
+                self._traj_axes_actors.append(az)
+
+        # 5. Draw directional path arrows
+        if show_arrows:
+            step = max(2, n_pts // 10)
+            for i in range(0, n_pts - 1, step):
+                p0 = pts_world_scaled[i]
+                p1 = pts_world_scaled[i+1]
+                direction = (p1 - p0)
+                d_norm = np.linalg.norm(direction)
+                if d_norm > 1e-4:
+                    direction /= d_norm
+                    arrow = pv.Arrow(start=p0, direction=direction, scale=2.5 * self.grid_units_per_cm)
+                    act = self.plotter.add_mesh(arrow, color="#ffeb3b", name=f"traj_arr_{i}")
+                    self._traj_arrow_actors.append(act)
+
+        self.plotter.render()
+
+    def clear_trajectory_preview(self):
+        """Remove all trajectory-related actors from the scene."""
+        if hasattr(self, '_traj_axes_actors'):
+            for act in self._traj_axes_actors:
+                try:
+                    self.plotter.remove_actor(act)
+                except:
+                    pass
+            self._traj_axes_actors.clear()
+        else:
+            self._traj_axes_actors = []
+            
+        if hasattr(self, '_traj_arrow_actors'):
+            for act in self._traj_arrow_actors:
+                try:
+                    self.plotter.remove_actor(act)
+                except:
+                    pass
+            self._traj_arrow_actors.clear()
+        else:
+            self._traj_arrow_actors = []
+
+        actors_to_remove = [
+            "traj_line", "traj_line_completed", "traj_line_remaining", 
+            "traj_reach_pts", "traj_unreach_pts", "traj_start_pt", 
+            "traj_end_pt", "live_tcp_trail", "traj_tcp_marker"
+        ]
+        for name in actors_to_remove:
+            try:
+                self.plotter.remove_actor(name)
+            except Exception:
+                pass
+                
+        # remove dynamic arrow/axis actors from renderer if any remain
+        for actor_name in list(self.plotter.renderer.actors.keys()):
+            if actor_name.startswith("traj_ax_") or actor_name.startswith("traj_arr_"):
+                try:
+                    self.plotter.remove_actor(actor_name)
+                except:
+                    pass
+                    
+        if hasattr(self, '_live_tcp_trail_pts'):
+            self._live_tcp_trail_pts.clear()
+            
+        self.plotter.render()
+
+    def update_live_tcp_marker(self, point_world):
+        """Draws/updates the current TCP coordinates marker in world space."""
+        pt_scaled = point_world * self.grid_units_per_cm
+        
+        if hasattr(self, '_tcp_marker_actor') and self._tcp_marker_actor is not None:
+            try:
+                mat = np.eye(4)
+                mat[:3, 3] = pt_scaled
+                self._tcp_marker_actor.user_matrix = mat
+                return
+            except Exception:
+                pass
+                
+        sphere = pv.Sphere(radius=1.3 * self.grid_units_per_cm, center=(0, 0, 0))
+        self._tcp_marker_actor = self.plotter.add_mesh(
+            sphere,
+            color="#e91e63", # Sleek Premium Magenta Glow
+            name="traj_tcp_marker",
+            pickable=False,
+            lighting=True
+        )
+        mat = np.eye(4)
+        mat[:3, 3] = pt_scaled
+        self._tcp_marker_actor.user_matrix = mat
+
+    def clear_live_tcp_marker(self):
+        """Removes the active TCP simulation marker."""
+        if hasattr(self, '_tcp_marker_actor'):
+            self._tcp_marker_actor = None
+        try:
+            self.plotter.remove_actor("traj_tcp_marker")
+        except Exception:
+            pass
+        self.plotter.render()
+
+    def update_live_tcp_trail(self, pt_world):
+        """Adds a coordinate position to the live TCP toolpath trail."""
+        if not hasattr(self, '_live_tcp_trail_pts'):
+            self._live_tcp_trail_pts = []
+        self._live_tcp_trail_pts.append(pt_world * self.grid_units_per_cm)
+        if len(self._live_tcp_trail_pts) > 500:
+            self._live_tcp_trail_pts.pop(0)
+            
+        if len(self._live_tcp_trail_pts) > 1:
+            try:
+                self.plotter.remove_actor("live_tcp_trail")
+            except:
+                pass
+            trail_mesh = pv.MultipleLines(points=np.array(self._live_tcp_trail_pts))
+            self.plotter.add_mesh(trail_mesh, color="#e91e63", line_width=2, name="live_tcp_trail", pickable=False, lighting=False)
+
+    def update_trajectory_progress(self, elapsed_time, trajectory):
+        """
+        Updates the trajectory line progress coloring:
+        - Completed portion colored green
+        - Remaining portion colored in original blue
+        """
+        if self.current_workspace_plan is None:
+            return
+
+        try:
+            base_world_transform = self.window().robot.base_link.t_world
+        except Exception:
+            base_world_transform = np.eye(4)
+
+        t_ws_world = self.current_workspace_plan.get_workspace_to_world_transform(base_world_transform)
+
+        pts_local = np.array(trajectory.points, dtype=float)
+        pts_hom = np.hstack([pts_local, np.ones((len(pts_local), 1))])
+        pts_world = (pts_hom @ t_ws_world.T)[:, :3]
+        pts_world_scaled = pts_world * self.grid_units_per_cm
+
+        k = np.searchsorted(trajectory.timestamps, elapsed_time)
+        k = max(0, min(k, len(pts_world_scaled)))
+
+        for name in ["traj_line_completed", "traj_line_remaining", "traj_line"]:
+            try:
+                self.plotter.remove_actor(name)
+            except Exception:
+                pass
+
+        if k > 1:
+            comp_mesh = pv.MultipleLines(points=pts_world_scaled[:k])
+            self.plotter.add_mesh(
+                comp_mesh,
+                color="#4caf50",  # Green completion indicator
+                line_width=4,
+                name="traj_line_completed",
+                pickable=False,
+                lighting=False
+            )
+
+        if k < len(pts_world_scaled):
+            rem_pts = pts_world_scaled[max(0, k-1):]
+            if len(rem_pts) > 1:
+                rem_mesh = pv.MultipleLines(points=rem_pts)
+                self.plotter.add_mesh(
+pickable=False,
+                    lighting=True
+                )
+
+            if unreach_indices:
+                unreach_pts = pts_world_scaled[unreach_indices]
+                unreach_poly = pv.PolyData(unreach_pts)
+                unreach_spheres = unreach_poly.glyph(geom=pv.Sphere(radius=0.55 * self.grid_units_per_cm))
+                self._traj_unreach_actor = self.plotter.add_mesh(
+                    unreach_spheres,
+                    color="#f44336",  # Red
+                    name="traj_unreach_pts",
+                    pickable=False,
+                    lighting=True
+                )
+
+        # 4. Draw coordinate axes overlays
+        if show_axes:
+            step = max(1, n_pts // 15)
+            for i in range(0, n_pts, step):
+                pt = pts_world_scaled[i]
+                rot = trajectory.orientations[i]
+                rot_world = t_ws_world[:3, :3] @ rot
+                
+                axis_len = 4.0 * self.grid_units_per_cm
+                x_end = pt + rot_world[:, 0] * axis_len
+                y_end = pt + rot_world[:, 1] * axis_len
+                z_end = pt + rot_world[:, 2] * axis_len
+                
+                ax = self.plotter.add_mesh(pv.Line(pt, x_end), color="red", line_width=2, name=f"traj_ax_{i}_x")
+                self._traj_axes_actors.append(ax)
+                ay = self.plotter.add_mesh(pv.Line(pt, y_end), color="green", line_width=2, name=f"traj_ax_{i}_y")
+                self._traj_axes_actors.append(ay)
+                az = self.plotter.add_mesh(pv.Line(pt, z_end), color="blue", line_width=2, name=f"traj_ax_{i}_z")
+                self._traj_axes_actors.append(az)
+
+        # 5. Draw directional path arrows
+        if show_arrows:
+            step = max(2, n_pts // 10)
+            for i in range(0, n_pts - 1, step):
+                p0 = pts_world_scaled[i]
+                p1 = pts_world_scaled[i+1]
+                direction = (p1 - p0)
+                d_norm = np.linalg.norm(direction)
+                if d_norm > 1e-4:
+                    direction /= d_norm
+                    arrow = pv.Arrow(start=p0, direction=direction, scale=2.5 * self.grid_units_per_cm)
+                    act = self.plotter.add_mesh(arrow, color="#ffeb3b", name=f"traj_arr_{i}")
+                    self._traj_arrow_actors.append(act)
+
+        self.plotter.render()
+
+    def clear_trajectory_preview(self):
+        """Remove all trajectory-related actors from the scene."""
+        if hasattr(self, '_traj_axes_actors'):
+            for act in self._traj_axes_actors:
+                try:
+                    self.plotter.remove_actor(act)
+                except:
+                    pass
+            self._traj_axes_actors.clear()
+        else:
+            self._traj_axes_actors = []
+            
+        if hasattr(self, '_traj_arrow_actors'):
+            for act in self._traj_arrow_actors:
+                try:
+                    self.plotter.remove_actor(act)
+                except:
+                    pass
+            self._traj_arrow_actors.clear()
+        else:
+            self._traj_arrow_actors = []
+
+        actors_to_remove = [
+            "traj_line", "traj_line_completed", "traj_line_remaining", 
+            "traj_reach_pts", "traj_unreach_pts", "traj_start_pt", 
+            "traj_end_pt", "live_tcp_trail", "traj_tcp_marker"
+        ]
+        for name in actors_to_remove:
+            try:
+                self.plotter.remove_actor(name)
+            except Exception:
+                pass
+                
+        # remove dynamic arrow/axis actors from renderer if any remain
+        for actor_name in list(self.plotter.renderer.actors.keys()):
+            if actor_name.startswith("traj_ax_") or actor_name.startswith("traj_arr_"):
+                try:
+                    self.plotter.remove_actor(actor_name)
+                except:
+                    pass
+                    
+        if hasattr(self, '_live_tcp_trail_pts'):
+            self._live_tcp_trail_pts.clear()
+            
+        self.plotter.render()
+
+    def update_live_tcp_marker(self, point_world):
+        """Draws/updates the current TCP coordinates marker in world space."""
+        pt_scaled = point_world * self.grid_units_per_cm
+        
+        if hasattr(self, '_tcp_marker_actor') and self._tcp_marker_actor is not None:
+            try:
+                mat = np.eye(4)
+                mat[:3, 3] = pt_scaled
+                self._tcp_marker_actor.user_matrix = mat
+                return
+            except Exception:
+                pass
+                
+        sphere = pv.Sphere(radius=1.3 * self.grid_units_per_cm, center=(0, 0, 0))
+        self._tcp_marker_actor = self.plotter.add_mesh(
+            sphere,
+            color="#e91e63", # Sleek Premium Magenta Glow
+            name="traj_tcp_marker",
+            pickable=False,
+            lighting=True
+        )
+        mat = np.eye(4)
+        mat[:3, 3] = pt_scaled
+        self._tcp_marker_actor.user_matrix = mat
+
+    def clear_live_tcp_marker(self):
+        """Removes the active TCP simulation marker."""
+        if hasattr(self, '_tcp_marker_actor'):
+            self._tcp_marker_actor = None
+        try:
+            self.plotter.remove_actor("traj_tcp_marker")
+        except Exception:
+            pass
+        self.plotter.render()
+
+    def update_live_tcp_trail(self, pt_world):
+        """Adds a coordinate position to the live TCP toolpath trail."""
+        if not hasattr(self, '_live_tcp_trail_pts'):
+            self._live_tcp_trail_pts = []
+        self._live_tcp_trail_pts.append(pt_world * self.grid_units_per_cm)
+        if len(self._live_tcp_trail_pts) > 500:
+            self._live_tcp_trail_pts.pop(0)
+            
+        if len(self._live_tcp_trail_pts) > 1:
+            try:
+                self.plotter.remove_actor("live_tcp_trail")
+            except:
+                pass
+            trail_mesh = pv.MultipleLines(points=np.array(self._live_tcp_trail_pts))
+            self.plotter.add_mesh(trail_mesh, color="#e91e63", line_width=2, name="live_tcp_trail", pickable=False, lighting=False)
+
+    def update_trajectory_progress(self, elapsed_time, trajectory):
+        """
+        Updates the trajectory line progress coloring:
+        - Completed portion colored green
+        - Remaining portion colored in original blue
+        """
+        if self.current_workspace_plan is None:
+            return
+
+        try:
+            base_world_transform = self.window().robot.base_link.t_world
+        except Exception:
+            base_world_transform = np.eye(4)
+
+        t_ws_world = self.current_workspace_plan.get_workspace_to_world_transform(base_world_transform)
+
+        pts_local = np.array(trajectory.points, dtype=float)
+        pts_hom = np.hstack([pts_local, np.ones((len(pts_local), 1))])
+        pts_world = (pts_hom @ t_ws_world.T)[:, :3]
+        pts_world_scaled = pts_world * self.grid_units_per_cm
+
+        k = np.searchsorted(trajectory.timestamps, elapsed_time)
+        k = max(0, min(k, len(pts_world_scaled)))
+
+        for name in ["traj_line_completed", "traj_line_remaining", "traj_line"]:
+            try:
+                self.plotter.remove_actor(name)
+            except Exception:
+                pass
+
+        if k > 1:
+            comp_mesh = pv.MultipleLines(points=pts_world_scaled[:k])
+            self.plotter.add_mesh(
+                comp_mesh,
+                color="#4caf50",  # Green completion indicator
+                line_width=4,
+                name="traj_line_completed",
+                pickable=False,
+                lighting=False
+            )
+
+        if k < len(pts_world_scaled):
+            rem_pts = pts_world_scaled[max(0, k-1):]
+            if len(rem_pts) > 1:
+                rem_mesh = pv.MultipleLines(points=rem_pts)
+                self.plotter.add_mesh(
+                    rem_mesh,
+                    color="#1e88e5",  # Royal Blue remaining
+                    line_width=3,
+                    name="traj_line_remaining",
+                    pickable=False,
+                    lighting=False
+                )
+
+    def draw_waypoint_markers(self, points):
+        """Draws interactive spherical waypoint control point markers in the 3D scene."""
+        if getattr(self, "is_dragging_waypoint", False):
+            return
+            
+        self.clear_waypoint_markers()
+        if self.current_workspace_plan is None:
+            return
+            
+        try:
+            base_world_transform = self.window().robot.base_link.t_world
+        except Exception:
+            base_world_transform = np.eye(4)
+            
+        t_ws_world = self.current_workspace_plan.get_workspace_to_world_transform(base_world_transform)
+        
+        for i, pt_local in enumerate(points):
+            pt_hom = np.array([pt_local[0], pt_local[1], pt_local[2], 1.0])
+            pt_world = (pt_hom @ t_ws_world.T)[:3]
+            pt_world_scaled = pt_world * self.grid_units_per_cm
+            
+            sphere = pv.Sphere(radius=1.2 * self.grid_units_per_cm, center=pt_world_scaled)
+            actor = self.plotter.add_mesh(
+                sphere,
+                color="#1e88e5",
+                name=f"waypoint_{i}",
+                pickable=True,
+                lighting=True
+            )
+            self._waypoint_actors[f"waypoint_{i}"] = actor
+            
+        self.plotter.render()
+
+    def clear_waypoint_markers(self):
+        """Remove all waypoint actors from the plotter."""
+        if hasattr(self, '_waypoint_actors'):
+            for name in list(self._waypoint_actors.keys()):
+                try:
+                    self.plotter.remove_actor(name)
+                except Exception:
+                    pass
+            self._waypoint_actors.clear()
+
+    def view_top(self):
+        """Set camera to top orthographic view."""
+        self.plotter.view_xy()
+        self.plotter.camera.SetParallelProjection(True)
+        if self.current_workspace_plan:
+            w = self.current_workspace_plan.width * self.grid_units_per_cm
+            self.plotter.camera.SetParallelScale(w * 0.7)
+        self.plotter.render()
+
+    def view_isometric(self):
+        """Set camera to standard isometric view."""
+        self.plotter.camera.SetParallelProjection(False)
+        self.plotter.view_isometric()
+        self.plotter.render()
+
+    def view_front(self):
+        """Set camera to front view."""
+        self.plotter.camera.SetParallelProjection(True)
+        self.plotter.view_xz()
+        self.plotter.render()
+
+    def view_side(self):
+        """Set camera to side view (YZ plane)."""
+        self.plotter.camera.SetParallelProjection(True)
+        self.plotter.view_yz()
+        self.plotter.render()
+
+    def auto_focus_trajectory(self, trajectory):
+        """Calculates bounding box of path and focuses camera on it."""
+        if trajectory is None or len(trajectory.points) == 0:
+            return
+            
+        try:
+            base_world_transform = self.window().robot.base_link.t_world
+        except Exception:
+            base_world_transform = np.eye(4)
+
+        t_ws_world = self.current_workspace_plan.get_workspace_to_world_transform(base_world_transform)
+        pts_local = np.array(trajectory.points, dtype=float)
+        pts_hom = np.hstack([pts_local, np.ones((len(pts_local), 1))])
+        pts_world = (pts_hom @ t_ws_world.T)[:, :3]
+        pts_world_scaled = pts_world * self.grid_units_per_cm
+        
+        min_bounds = np.min(pts_world_scaled, axis=0)
+        max_bounds = np.max(pts_world_scaled, axis=0)
+        center = (min_bounds + max_bounds) / 2.0
+        
+        self.plotter.camera.SetFocalPoint(center[0], center[1], center[2])
+        span = np.linalg.norm(max_bounds - min_bounds)
+        dist = max(30.0, span * 1.5)
+        
+        self.plotter.camera.SetPosition(center[0] + dist, center[1] - dist, center[2] + dist)
+        self.plotter.render()
+
+    def draw_workspace_plane(self, workspace_plan):
+        """
+        Draws the 45-degree inclined workspace plane in the 3D environment.
+        """
+        self.current_workspace_plan = None
+        self._clear_workspace_plane_markings()
+        for actor_name in ("auto_workspace_plane", "auto_workspace_plane_boundary", "auto_workspace_plane_stand"):
+            try:
+                self.plotter.remove_actor(actor_name)
+            except Exception:
+                pass
+        self._workspace_plane_actor = None
+        self._workspace_plane_boundary_actor = None
+        self._workspace_plane_stand_actor = None
+        self._workspace_plane_visible = False
+
+    def _clear_workspace_plane_markings(self):
+        for actor in getattr(self, "_workspace_plane_marking_actors", []):
+            try:
+                self.plotter.remove_actor(actor)
+            except Exception:
+                try:
+                    self.plotter.renderer.RemoveActor(actor)
+                except Exception:
+                    pass
+        self._workspace_plane_marking_actors = []
+
+    def _workspace_label_actor(self, text, point, color="#5f5200", font_size=12):
+        txt_actor = vtkRenderingCore.vtkBillboardTextActor3D()
+        txt_actor.SetInput(str(text))
+        txt_actor.SetPosition(float(point[0]), float(point[1]), float(point[2]))
+        prop = txt_actor.GetTextProperty()
+        prop.SetFontSize(int(font_size))
+        prop.SetColor(list(pv.Color(color))[:3])
+        prop.SetBold(True)
+        prop.SetFontFamilyToArial()
+        prop.SetJustificationToCentered()
+        txt_actor.SetPickable(False)
+        self.plotter.renderer.AddActor(txt_actor)
+        self._workspace_plane_marking_actors.append(txt_actor)
+        return txt_actor
+
+    def _draw_workspace_plane_markings(self, workspace_plan, base_world_cm, ratio):
+        min_x, max_x, min_y, max_y = workspace_plan.get_local_bounds()
+        width = max_x - min_x
+        height = max_y - min_y
+        if width <= 0.0 or height <= 0.0:
+            return
+
+        grid_cm = float(getattr(workspace_plan, "grid_size", 10.0) or 10.0)
+        grid_cm = max(1.0, grid_cm)
+        while width / grid_cm > 12 or height / grid_cm > 12:
+            grid_cm *= 2.0
+
+        t_ws_world_cm = workspace_plan.get_workspace_to_world_transform(base_world_cm)
+        normal = t_ws_world_cm[:3, 2]
+        normal = normal / max(np.linalg.norm(normal), 1e-9)
+        lift = normal * (0.12 * ratio)
+
+        def to_world(local_pt):
+            return workspace_plan.convert_local_to_world(local_pt, base_world_cm) * ratio + lift
+
+        points = []
+        lines = []
+
+        def add_line(p0, p1):
+            idx = len(points)
+            points.extend([p0, p1])
+            lines.extend([2, idx, idx + 1])
+
+        x_values = list(np.arange(min_x, max_x + 1e-6, grid_cm))
+        y_values = list(np.arange(min_y, max_y + 1e-6, grid_cm))
+        if not np.isclose(x_values[-1], max_x):
+            x_values.append(max_x)
+        if not np.isclose(y_values[-1], max_y):
+            y_values.append(max_y)
+
+        for x in x_values:
+            add_line(to_world([x, min_y, 0.0]), to_world([x, max_y, 0.0]))
+        for y in y_values:
+            add_line(to_world([min_x, y, 0.0]), to_world([max_x, y, 0.0]))
+
+        if points:
+            grid_poly = pv.PolyData()
+            grid_poly.points = np.array(points, dtype=float)
+            grid_poly.lines = np.array(lines, dtype=np.int_)
+            actor = self.plotter.add_mesh(
+                grid_poly,
+                color="#d8c85a",
+                line_width=1,
+                name="auto_workspace_plane_cm_grid",
+                pickable=False,
+                lighting=False,
+            )
+            self._workspace_plane_marking_actors.append(actor)
+
+        label_step = grid_cm
+        while width / label_step > 8 or height / label_step > 8:
+            label_step *= 2.0
+
+        x_label_values = list(np.arange(min_x, max_x + 1e-6, label_step))
+        y_label_values = list(np.arange(min_y, max_y + 1e-6, label_step))
+        if not np.isclose(x_label_values[-1], max_x):
+            x_label_values.append(max_x)
+        if not np.isclose(y_label_values[-1], max_y):
+            y_label_values.append(max_y)
+
+        label_offset_y = max(0.8, height * 0.045)
+        label_offset_x = max(0.8, width * 0.045)
+        for x in x_label_values:
+            self._workspace_label_actor(
+                f"{x:g} cm",
+                to_world([x, min_y - label_offset_y, 0.0]),
+                font_size=11,
+            )
+        for y in y_label_values:
+            self._workspace_label_actor(
+                f"{y:g} cm",
+                to_world([min_x - label_offset_x, y, 0.0]),
+                font_size=11,
+            )
+
+        self._workspace_label_actor(
+            f"Drawing plane: {width:.1f} x {height:.1f} cm",
+            to_world([(min_x + max_x) / 2.0, max_y + label_offset_y, 0.0]),
+            color="#8a6d00",
+            font_size=13,
+        )
+
+    def set_workspace_plane_visible(self, visible, render=True):
+        """Show or hide the reachable drawing plane without touching CAD traces."""
+        self._workspace_plane_visible = bool(visible)
+        for actor in (
+            getattr(self, "_workspace_plane_actor", None),
+            getattr(self, "_workspace_plane_boundary_actor", None),
+            getattr(self, "_workspace_plane_stand_actor", None),
+            *getattr(self, "_workspace_plane_marking_actors", []),
+        ):
+            if actor is not None:
+                try:
+                    actor.SetVisibility(1 if self._workspace_plane_visible else 0)
+                except Exception:
+                    pass
+        if render:
+            self.plotter.render()
+        return self._workspace_plane_visible
+
+    def toggle_workspace_plane_visible(self):
+        """Toggle the reachable drawing plane fill and border."""
+        return self.set_workspace_plane_visible(
+            not getattr(self, "_workspace_plane_visible", True)
+        )
+
+    def add_cad_line(self, pt1_world, pt2_world):
+        """Draw a thin red line segment from live-point world positions in cm."""
+        if not hasattr(self, '_cad_actors'):
+            self._cad_actors = []
+        
+        ratio = self.grid_units_per_cm
+        pts = np.array([pt1_world * ratio, pt2_world * ratio], dtype=float)
+        line_mesh = pv.MultipleLines(points=pts)
+        
+        actor_name = f"cad_draw_{len(self._cad_actors)}"
+        actor = self.plotter.add_mesh(
+            line_mesh,
+            color="#d32f2f",
+            line_width=2,
+            name=actor_name,
+            pickable=False,
+            lighting=False
+        )
+        self._cad_actors.append(actor_name)
+        self.plotter.render()
+
+    def clear_cad_drawings(self):
+        """Clears all drawn CAD path actors from the canvas."""
+        if hasattr(self, '_cad_actors'):
+            for name in self._cad_actors:
+                try:
+                    self.plotter.remove_actor(name)
+                except Exception:
+                    pass
+            self._cad_actors.clear()
+        self.plotter.render()

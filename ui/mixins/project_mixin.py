@@ -113,10 +113,20 @@ class ProjectMixin:
         import tempfile
         import shutil
 
+        default_filename = "project.trn"
+        if hasattr(self, "current_session_index") and self.current_session_index >= 0:
+            sess = self.robot_sessions[self.current_session_index]
+            if sess.get("project_file_path"):
+                default_filename = os.path.basename(sess["project_file_path"])
+            elif hasattr(self, "session_tab_bar"):
+                tab_title = self.session_tab_bar.tabText(self.current_session_index)
+                if tab_title != "ToRoTrOn" and not tab_title.startswith("Robo "):
+                    default_filename = f"{tab_title}.trn"
+
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Project",
-            os.path.join(self._project_dialog_dir(), "project.trn"),
+            os.path.join(self._project_dialog_dir(), default_filename),
             "ToRoTRoN Project (*.trn);;Zip Archive (*.zip);;All Files (*)"
         )
         if not file_path:
@@ -173,6 +183,7 @@ class ProjectMixin:
                     })
 
                 # 2. Gather Joints (Robot Core)
+                saved_home = getattr(self.robot, "home_joint_values", None)
                 for name, joint in self.robot.joints.items():
                     robot_data["joints"].append({
                         "name": joint.name,
@@ -185,6 +196,10 @@ class ProjectMixin:
                         "max_limit": joint.max_limit,
                         "current_value": joint.current_value
                     })
+                if saved_home:
+                    robot_data["ui_state"]["home_joint_values"] = {
+                        str(name): float(value) for name, value in saved_home.items()
+                    }
 
                 # 2b. Joint Relations
                 for master_id, slaves in self.robot.joint_relations.items():
@@ -243,6 +258,16 @@ class ProjectMixin:
                             zipf.write(abs_file, rel_file)
 
             self.log(f"Project saved to: {file_path}")
+            if hasattr(self, "current_session_index") and self.current_session_index >= 0:
+                session = self.robot_sessions[self.current_session_index]
+                session["robot"] = self.robot
+                session["project_file_path"] = file_path
+                title, _ = os.path.splitext(os.path.basename(file_path))
+                session["title"] = title
+                if hasattr(self, "_capture_current_robot_session"):
+                    self._capture_current_robot_session()
+                if hasattr(self, "session_tab_bar"):
+                    self.session_tab_bar.setTabText(self.current_session_index, title)
             QtWidgets.QMessageBox.information(self, "Success", "Project saved successfully.")
 
         except Exception as e:
@@ -314,6 +339,7 @@ class ProjectMixin:
 
                 # 4. Load Links
                 for l_data in robot_data["links"]:
+                    QtWidgets.QApplication.processEvents()
                     name = l_data["name"]
                     mesh_rel_path = l_data["mesh_file"]
                     mesh_path = os.path.join(temp_dir, mesh_rel_path)
@@ -353,6 +379,7 @@ class ProjectMixin:
 
                 # 5. Load Joints (Robot Core)
                 for j_data in robot_data["joints"]:
+                    QtWidgets.QApplication.processEvents()
                     name = j_data["name"]
                     parent_name = j_data["parent_link"]
                     child_name = j_data["child_link"]
@@ -368,9 +395,19 @@ class ProjectMixin:
 
                 # 5b. Load Joint Relations
                 self.robot.joint_relations = robot_data.get("joint_relations", {})
+                self.robot.home_joint_values = {
+                    j_data["name"]: float(j_data.get("current_value", 0.0))
+                    for j_data in robot_data.get("joints", [])
+                }
 
                 # 6. Load UI State
                 ui_state = robot_data.get("ui_state", {})
+                saved_home = ui_state.get("home_joint_values")
+                if isinstance(saved_home, dict):
+                    self.robot.home_joint_values.update({
+                        str(name): float(value) for name, value in saved_home.items()
+                        if name in self.robot.joints
+                    })
                 
                 # Restore Joint Panel Data
                 if hasattr(self, 'joint_tab'):
@@ -401,18 +438,22 @@ class ProjectMixin:
                         p, c = key.split("|||")
                         self.alignment_cache[(p, c)] = np.array(pt)
 
-                # VERY IMPORTANT: Restore the UI Joint panels and re-render visual joints
+                # Restore the UI Joint panels and re-render visual joints.
+                # During silent startup loading, skip the eager rebuild because it
+                # refreshes several heavy panels for every joint and can make the
+                # app look hung before the first paint.
                 if hasattr(self, 'joint_tab'):
                     # Clear out arrows first
                     arrow_names = [a for a in self.canvas.actors.keys() if a.startswith("joint_axis_")]
                     for aname in arrow_names:
                         self.canvas.remove_actor(aname)
-                        
-                    # Rebuild 3D arrows for all joints by syncing the UI state
-                    for child_name, data in self.joint_tab.joints.items():
-                        # Using show_joint_control ensures radio buttons and labels match the loaded data
-                        self.joint_tab.show_joint_control(child_name)
-                        
+
+                    should_rebuild_joint_controls = show_dialogs or auto_finalize
+                    if should_rebuild_joint_controls:
+                        # Rebuild 3D arrows for all joints by syncing the UI state.
+                        for child_name, data in self.joint_tab.joints.items():
+                            self.joint_tab.show_joint_control(child_name)
+
                     self.joint_tab.active_joint_control = None # Unselect
 
                 # Restore Speed
@@ -444,12 +485,16 @@ class ProjectMixin:
                 if last_project_dir and os.path.isdir(last_project_dir):
                     self.last_project_dir = last_project_dir
 
+                zero_joint_values = {name: 0.0 for name in self.robot.joints.keys()}
+                self.robot.home_joint_values = dict(zero_joint_values)
+                self.robot.reset_to_home(home_angle=0.0, home_joint_values=zero_joint_values)
+
             # 7. Final Update
             self.robot.update_kinematics()
             self.canvas.update_transforms(self.robot)
             self.update_link_colors()
             if hasattr(self, "update_live_ui"):
-                self.update_live_ui()
+                self.update_live_ui(render=False)
             
             # Refresh Matrices Panel
             if hasattr(self, 'matrices_tab'):
@@ -464,6 +509,18 @@ class ProjectMixin:
                 self.make_robot()
             
             self.log(f"Project loaded from: {os.path.basename(file_path)}")
+            if hasattr(self, "current_session_index") and self.current_session_index >= 0:
+                session = self.robot_sessions[self.current_session_index]
+                session["robot"] = self.robot
+                session["project_file_path"] = file_path
+                title, _ = os.path.splitext(os.path.basename(file_path))
+                if self.current_session_index == 0 and title.lower() == "default_robot":
+                    title = "ToRoTrOn"
+                session["title"] = title
+                if hasattr(self, "_capture_current_robot_session"):
+                    self._capture_current_robot_session()
+                if hasattr(self, "session_tab_bar"):
+                    self.session_tab_bar.setTabText(self.current_session_index, title)
             if show_dialogs:
                 QtWidgets.QMessageBox.information(self, "Success", f"Project '{os.path.basename(file_path)}' loaded successfully.")
             return True
@@ -485,3 +542,63 @@ class ProjectMixin:
         if not file_path:
             return False
         return self.load_project_from_path(file_path, show_dialogs=True, auto_finalize=True)
+
+    def new_project(self):
+        """Clears the workspace and initializes a new empty robot project."""
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "New Project",
+            "Are you sure you want to clear the current project and start a new robot assembly?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.No
+        )
+        if reply == QtWidgets.QMessageBox.Yes:
+            self.robot = Robot()
+            self.canvas.clear_highlights()
+            # Remove all actors from canvas
+            actor_names = list(self.canvas.actors.keys())
+            for name in actor_names:
+                self.canvas.remove_actor(name)
+            self.canvas.fixed_actors.clear()
+            self.links_list.clear()
+            self.alignment_cache = {}
+
+            # Reset UI Panels
+            if hasattr(self, 'joint_tab'):
+                self.joint_tab.reset_joint_ui()
+            if hasattr(self, 'align_tab'):
+                self.align_tab.reset_panel()
+            if hasattr(self, "import_preferences"):
+                self.import_preferences = {
+                    "last_stl_unit": "mm",
+                    "last_up_axis": "preserve",
+                }
+            self.canvas.plotter.reset_camera()
+            self.canvas.plotter.render()
+
+            if hasattr(self, "experiment_btn"):
+                self.experiment_btn.setChecked(False)
+            if hasattr(self, "experiment_container"):
+                self.experiment_container.setVisible(False)
+            if hasattr(self, "assembly_btn"):
+                self.assembly_btn.setChecked(True)
+            if hasattr(self, "left_container"):
+                self.left_container.setVisible(True)
+            if hasattr(self, "_set_main_splitter_layout"):
+                self._set_main_splitter_layout(show_assembly=True, show_experiment=False)
+            if hasattr(self, "switch_panel"):
+                self.switch_panel(0)
+
+            self.log("Add Robo: new empty robot assembly initialized.")
+            if hasattr(self, "current_session_index") and self.current_session_index >= 0:
+                self.robot_sessions[self.current_session_index]["project_file_path"] = None
+                if hasattr(self, "session_tab_bar"):
+                    default_name = "ToRoTrOn" if self.current_session_index == 0 else f"Robo {self.current_session_index + 1}"
+                    self.session_tab_bar.setTabText(self.current_session_index, default_name)
+            if hasattr(self, "show_toast"):
+                self.show_toast("New project created", "success")
+
+
+
+
+

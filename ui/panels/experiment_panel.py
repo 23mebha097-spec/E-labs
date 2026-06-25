@@ -5,7 +5,6 @@ from ui.panels.ik_fk_panel import IKFKPanel
 from ui.panels.result_panel import ResultPanel
 from ui.panels.program_panel import ProgramPanel
 
-
 class ExperimentPanel(QtWidgets.QWidget):
     def __init__(self, main_window):
         super().__init__()
@@ -56,6 +55,13 @@ class ExperimentPanel(QtWidgets.QWidget):
         self.tabs.addTab(self.program_tab, "Code")
 
         layout.addWidget(self.tabs)
+
+        self.tabs.currentChanged.connect(self.on_tab_changed)
+
+    def on_tab_changed(self, index):
+        widget = self.tabs.widget(index)
+        if hasattr(widget, "update_display"):
+            widget.update_display()
 
     def refresh_sliders(self):
         self.matrices_tab.refresh_sliders()
