@@ -259,6 +259,8 @@ class SimulationPanel(QtWidgets.QWidget):
         self.is_sim_active = False
         self.gripped_object = None
         self.grip_offset = None # Relative transform
+        self.grip_original_rotation = None
+        self.grip_locked_rotation = None
         self.grip_translation_offset = None
         
         self.sim_timer = QtCore.QTimer(self)
@@ -1033,6 +1035,8 @@ class SimulationPanel(QtWidgets.QWidget):
             self.main_window.log("📍 Initializing motion sequence from Robot Base...")
             self.gripped_object = None
             self.grip_offset = None
+            self.grip_original_rotation = None
+            self.grip_locked_rotation = None
             self.grip_translation_offset = None
             self.target_joint_values = {}
             self._target_gripper_angles = {}  # for smooth animation
@@ -1056,6 +1060,7 @@ class SimulationPanel(QtWidgets.QWidget):
             self._pick_place_tcp_orientation = None
             self._pick_place_original_object_rotation = None
             self.grip_original_rotation = None
+            self.grip_locked_rotation = None
             if hasattr(self.main_window, "canvas") and hasattr(self.main_window.canvas, "clear_highlights"):
                 self.main_window.canvas.clear_highlights()
             if hasattr(self.main_window, "canvas") and hasattr(self.main_window.canvas, "plotter") and hasattr(self.main_window.canvas.plotter, "render"):
@@ -1181,19 +1186,26 @@ class SimulationPanel(QtWidgets.QWidget):
         elif self.sim_state == "GRIP":
             if not self._target_gripper_angles:
                 self._prepare_grip_targets(tcp_link)
-            
-            if self._move_gripper_smoothly(tcp_link):
-                self._target_gripper_angles = {}
-                if self._finalize_grip(tcp_link):
-                    self.main_window.log("🧲 Object gripped between the configured jaws. Lifting from P1...")
-                    self.main_window.log("The gripper-object alignment will remain unchanged during transport.")
-                    self.sim_state = "SOLVE_LIFT_P1"
-                else:
-                    self.main_window.log("Pick aborted: both configured jaws did not contact the object.")
-                    self.main_window.show_toast("Grip failed: object is not between the jaws", "warning")
-                    self.target_joint_values = dict(self._initial_joint_state)
-                    self.joint_chain = self.main_window.robot.get_kinematic_chain(tcp_link)
-                    self.sim_state = "AUTO_RETURN"
+            try:
+                if self._move_gripper_smoothly(tcp_link):
+                    self._target_gripper_angles = {}
+                    if self._finalize_grip(tcp_link):
+                        self.main_window.log("🧲 Object gripped between the configured jaws. Lifting from P1...")
+                        self.main_window.log("The gripper-object alignment will remain unchanged during transport.")
+                        self.sim_state = "SOLVE_LIFT_P1"
+                    else:
+                        self.main_window.log("Pick aborted: both configured jaws did not contact the object.")
+                        self.main_window.show_toast("Grip failed: object is not between the jaws", "warning")
+                        self.target_joint_values = dict(self._initial_joint_state)
+                        self.joint_chain = self.main_window.robot.get_kinematic_chain(tcp_link)
+                        self.sim_state = "AUTO_RETURN"
+            except Exception as exc:
+                self.main_window.log(f"Grip state failed safely: {exc}")
+                if hasattr(self.main_window, "show_toast"):
+                    self.main_window.show_toast("Grip failed safely", "warning")
+                self.target_joint_values = dict(self._initial_joint_state)
+                self.joint_chain = self.main_window.robot.get_kinematic_chain(tcp_link)
+                self.sim_state = "AUTO_RETURN"
 
         elif self.sim_state == "SOLVE_LIFT_P1":
             self._handle_state_solve(
@@ -1559,8 +1571,48 @@ class SimulationPanel(QtWidgets.QWidget):
             return None
         return rotation
 
+    def _object_bottom_face_local_center(self, obj_link):
+        """Return the local-space center point of the object's bottom face."""
+        mesh = getattr(obj_link, "mesh", None)
+        if mesh is None:
+            return np.zeros(3)
+
+        try:
+            bounds = np.asarray(mesh.bounds, dtype=float)
+        except Exception:
+            return np.zeros(3)
+
+        if bounds.shape == (6,):
+            bounds = np.array([
+                [bounds[0], bounds[2], bounds[4]],
+                [bounds[1], bounds[3], bounds[5]],
+            ], dtype=float)
+        if bounds.shape != (2, 3):
+            return np.zeros(3)
+
+        return np.array([
+            0.5 * (float(bounds[0, 0]) + float(bounds[1, 0])),
+            0.5 * (float(bounds[0, 1]) + float(bounds[1, 1])),
+            float(bounds[0, 2]),
+        ], dtype=float)
+
     def _ground_aligned_object_rotation(self, obj_link):
-        """Return an object rotation whose base face stays parallel to the ground."""
+        """Return the object's locked imported rotation without changing orientation."""
+        if self.gripped_object and getattr(obj_link, "name", None) == self.gripped_object:
+            if self.grip_locked_rotation is not None:
+                try:
+                    rotation = np.asarray(self.grip_locked_rotation, dtype=float).reshape(3, 3)
+                    if np.all(np.isfinite(rotation)):
+                        return rotation
+                except Exception:
+                    pass
+            if self.grip_original_rotation is not None:
+                try:
+                    rotation = np.asarray(self.grip_original_rotation, dtype=float).reshape(3, 3)
+                    if np.all(np.isfinite(rotation)):
+                        return rotation
+                except Exception:
+                    pass
         base_rotation = self._imported_object_base_rotation(obj_link)
         if base_rotation is None:
             base_rotation = np.asarray(getattr(obj_link, "t_world", np.eye(4)), dtype=float)[:3, :3]
@@ -1568,31 +1620,60 @@ class SimulationPanel(QtWidgets.QWidget):
         base_rotation = np.asarray(base_rotation, dtype=float).reshape(3, 3)
         if not np.all(np.isfinite(base_rotation)):
             return np.eye(3)
+        return base_rotation
 
-        # Preserve the object's heading as much as possible while forcing the
-        # base face normal to point downward.
-        heading = base_rotation @ np.array([1.0, 0.0, 0.0], dtype=float)
-        heading[2] = 0.0
-        heading_norm = float(np.linalg.norm(heading))
-        if heading_norm <= 1e-9:
-            heading = base_rotation @ np.array([0.0, 1.0, 0.0], dtype=float)
-            heading[2] = 0.0
-            heading_norm = float(np.linalg.norm(heading))
-        if heading_norm <= 1e-9:
-            heading = np.array([1.0, 0.0, 0.0], dtype=float)
-            heading_norm = 1.0
-        x_axis = heading / heading_norm
-        z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
-        y_axis = np.cross(z_axis, x_axis)
-        y_norm = float(np.linalg.norm(y_axis))
-        if y_norm <= 1e-9:
-            y_axis = np.array([0.0, 1.0, 0.0], dtype=float)
-            y_norm = 1.0
-        y_axis /= y_norm
-        x_axis = np.cross(y_axis, z_axis)
-        x_axis /= max(float(np.linalg.norm(x_axis)), 1e-9)
+    def _current_gripper_jaw_midpoint_world(self, tcp_link):
+        """Compute the 3D midpoint of the currently configured jaw faces."""
+        payload = getattr(self.main_window, "gripper_tool_config", None)
+        if not isinstance(payload, dict):
+            payload = getattr(self.main_window, "end_effector_tool_config", None)
+        if not isinstance(payload, dict):
+            return None
 
-        return np.column_stack((x_axis, y_axis, z_axis))
+        definition = payload.get("EndEffector", payload)
+        if not isinstance(definition, dict):
+            return None
+
+        jaws = [jaw for jaw in definition.get("Jaws", []) if isinstance(jaw, dict)]
+        if not jaws:
+            return None
+
+        jaw_centers = []
+        for jaw in jaws:
+            joint_id = jaw.get("JointID")
+            joint = self.main_window.robot.joints.get(joint_id) if hasattr(self.main_window, "robot") else None
+            if joint is None or getattr(joint, "child_link", None) is None:
+                continue
+            local_center = np.asarray(jaw.get("FaceCenter", jaw.get("FaceCenterLocal", [0.0, 0.0, 0.0])), dtype=float).reshape(3)
+            child_world = np.asarray(joint.child_link.t_world, dtype=float)
+            jaw_centers.append((child_world @ np.append(local_center, 1.0))[:3])
+
+        if len(jaw_centers) < 2:
+            if tcp_link is None:
+                return None
+            try:
+                return np.asarray(tcp_link.t_world, dtype=float)[:3, 3].copy()
+            except Exception:
+                return None
+
+        return np.mean(np.asarray(jaw_centers, dtype=float), axis=0)
+
+    def _ground_aligned_object_pose(self, obj_link, anchor_world=None):
+        """Return a pose that keeps the object's imported orientation fixed."""
+        rotation = self._ground_aligned_object_rotation(obj_link)
+        mesh = getattr(obj_link, "mesh", None)
+        if mesh is None:
+            pose = np.eye(4)
+            pose[:3, :3] = rotation
+            pose[:3, 3] = np.zeros(3) if anchor_world is None else np.asarray(anchor_world, dtype=float).reshape(3)
+            return pose
+        local_bottom_center = self._object_bottom_face_local_center(obj_link)
+
+        pose = np.eye(4)
+        pose[:3, :3] = rotation
+        anchor = np.zeros(3) if anchor_world is None else np.asarray(anchor_world, dtype=float).reshape(3)
+        pose[:3, 3] = anchor - rotation @ local_bottom_center
+        return pose
 
 
     def _presise_gripper_for_approach(self):
@@ -1674,7 +1755,9 @@ class SimulationPanel(QtWidgets.QWidget):
         if len(contact_points) < 2:
             return
 
-        midpoint = np.mean(np.asarray(contact_points, dtype=float), axis=0)
+        midpoint = self._current_gripper_jaw_midpoint_world(tcp_link)
+        if midpoint is None:
+            midpoint = np.mean(np.asarray(contact_points, dtype=float), axis=0)
         R_obj = self._ground_aligned_object_rotation(obj_link)
 
         local_center = np.asarray(obj_link.mesh.centroid, dtype=float).reshape(3)
@@ -1683,66 +1766,79 @@ class SimulationPanel(QtWidgets.QWidget):
         snapped_pose[:3, 3] = midpoint - R_obj @ local_center
         obj_link.t_offset = snapped_pose
         self.main_window.robot.update_kinematics()
-        self.main_window.canvas.update_transforms(self.main_window.robot)
-        self.main_window.simulation_tab.refresh_object_info(obj_name)
+        if hasattr(self.main_window, "canvas") and hasattr(self.main_window.canvas, "update_transforms"):
+            self.main_window.canvas.update_transforms(self.main_window.robot)
+        if hasattr(self.main_window, "simulation_tab") and hasattr(self.main_window.simulation_tab, "refresh_object_info"):
+            self.main_window.simulation_tab.refresh_object_info(obj_name)
 
 
     def _finalize_grip(self, tcp_link):
         """Actually attaches the object to the robot after gripper finished closing."""
-        _, _, obj_link = self._get_object_grip_width()
-        if not obj_link or not obj_link.mesh:
-            return False
+        try:
+            _, _, obj_link = self._get_object_grip_width()
+            if not obj_link or not obj_link.mesh:
+                return False
 
-        contact_names = self._contacting_configured_gripper_joints()
-        contact_names.update(getattr(self, "_gripper_contact_joint_names", set()))
-        configured_names = set(self.main_window._configured_gripper_joint_names())
-        valid_contacts = contact_names.intersection(configured_names)
-        if len(valid_contacts) < 2:
+            contact_names = self._contacting_configured_gripper_joints()
+            contact_names.update(getattr(self, "_gripper_contact_joint_names", set()))
+            configured_names = set(self.main_window._configured_gripper_joint_names())
+            valid_contacts = contact_names.intersection(configured_names)
+            if len(valid_contacts) < 2:
+                self.main_window.log(
+                    f"Grip validation failed: {len(valid_contacts)} of {len(configured_names)} configured jaw joints touch the object."
+                )
+                return False
+
+            if not self._object_is_between_jaws(obj_link, valid_contacts):
+                self.main_window.log("Grip validation failed: jaw contacts are not on opposing sides of the object.")
+                return False
+
+            # Compute the exact 3D midpoint of the configured jaw faces.
+            world_tcp, local_tcp, geo_data = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
+            jaw_midpoint = self._current_gripper_jaw_midpoint_world(tcp_link)
+            if jaw_midpoint is not None:
+                world_tcp = np.asarray(jaw_midpoint, dtype=float).reshape(3)
+
+            # Lock the object in a ground-aligned pose so the bottom face stays on the graph.
+            t_obj_perfect = obj_link.t_world.copy()
+            t_obj_perfect[:3, :3] = self._ground_aligned_object_rotation(obj_link)
+
+            inv_hand = np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+            self.grip_offset = inv_hand @ t_obj_perfect
+            self.gripped_object = obj_link.name
+            self.grip_original_rotation = t_obj_perfect[:3, :3].copy()
+            self.grip_locked_rotation = self.grip_original_rotation.copy()
+            tcp_world = np.asarray(world_tcp, dtype=float).reshape(3)
+            self.grip_translation_offset = t_obj_perfect[:3, 3] - tcp_world
+
+            carried_pose = np.eye(4)
+            carried_pose[:3, :3] = self._ground_aligned_object_rotation(obj_link)
+            carried_pose[:3, 3] = tcp_world + self.grip_translation_offset
+            obj_link.t_offset = carried_pose
+            self.main_window.robot.update_kinematics()
+
             self.main_window.log(
-                f"Grip validation failed: {len(valid_contacts)} of {len(configured_names)} configured jaw joints touch the object."
+                f"? PERFECT GRIP: '{obj_link.name}' is now physically held by {len(getattr(tcp_link, 'child_joints', []))} finger components."
             )
+            if isinstance(geo_data, dict):
+                self.main_window.log(
+                    f"   Shape Data  : Reach={geo_data.get('finger_depth', 0)/10.0:.1f} cm | Gap={geo_data.get('real_gap', 0)/10.0:.1f} cm"
+                )
+
+            orig_color = obj_link.color if hasattr(obj_link, 'color') else 'silver'
+            if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'set_actor_color'):
+                self.main_window.canvas.set_actor_color(self.gripped_object, '#4caf50')
+                QtCore.QTimer.singleShot(
+                    500,
+                    lambda: self.main_window.canvas.set_actor_color(self.gripped_object, orig_color),
+                )
+
+            if hasattr(self.main_window, 'show_toast'):
+                self.main_window.show_toast(f"Held '{obj_link.name}' between fingers", 'success')
+            return True
+        except Exception as exc:
+            self.main_window.log(f"Grip finalize failed: {exc}")
             return False
-
-        if not self._object_is_between_jaws(obj_link, valid_contacts):
-            self.main_window.log("Grip validation failed: jaw contacts are not on opposing sides of the object.")
-            return False
-
-        # 1. Compute the exact TCP (centroid of fingers) at this moment
-        world_tcp, local_tcp, geo_data = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
-
-        # 2. Lock the object in its current snapped pose so the jaw faces keep
-        # touching it visually while the grip closes.
-        t_obj_perfect = obj_link.t_world.copy()
-        t_obj_perfect[:3, :3] = self._ground_aligned_object_rotation(obj_link)
-
-        # Store relative offset from Hand (TCP Link) to the snapped object pose
-        inv_hand = np.linalg.inv(tcp_link.t_world)
-        self.grip_offset = inv_hand @ t_obj_perfect
-        self.gripped_object = obj_link.name
-        self.grip_original_rotation = R_obj.copy()
-        tcp_world = np.asarray(tcp_link.t_world, dtype=float)
-        self.grip_translation_offset = t_obj_perfect[:3, 3] - tcp_world[:3, 3]
-        
-        # Apply immediately to the link offset
-        carried_pose = np.eye(4)
-        carried_pose[:3, :3] = self._ground_aligned_object_rotation(obj_link)
-        carried_pose[:3, 3] = tcp_world[:3, 3] + self.grip_translation_offset
-        obj_link.t_offset = carried_pose
-        self.main_window.robot.update_kinematics()
-        
-        # --- PERFECT GRIP FEEDBACK ---
-        self.main_window.log(f"✅ PERFECT GRIP: '{obj_link.name}' is now physically held by {len(tcp_link.child_joints)} finger components.")
-        if isinstance(geo_data, dict):
-            self.main_window.log(f"   Shape Data  : Reach={geo_data.get('finger_depth', 0)/10.0:.1f} cm | Gap={geo_data.get('real_gap', 0)/10.0:.1f} cm")
-        
-        # Visual Signal: Flash green to confirm surface contact
-        orig_color = obj_link.color if hasattr(obj_link, 'color') else "silver"
-        self.main_window.canvas.set_actor_color(self.gripped_object, "#4caf50")
-        QtCore.QTimer.singleShot(500, lambda: self.main_window.canvas.set_actor_color(self.gripped_object, orig_color))
-        
-        self.main_window.show_toast(f"Held '{obj_link.name}' between fingers", "success")
-        return True
-
 
     def _prepare_release_targets(self):
         """Calculates targets to open gripper fully."""
@@ -2013,29 +2109,36 @@ class SimulationPanel(QtWidgets.QWidget):
 
     def _carry_gripped_object(self, tcp_link):
         """Updates the gripped object's position every tick so it follows the TCP."""
-        if not self.gripped_object:
-            return
-        if self.gripped_object not in self.main_window.robot.links:
-            return
-        if self.grip_translation_offset is None:
-            if self.grip_offset is None:
+        try:
+            if not self.gripped_object:
                 return
-            self.grip_translation_offset = np.asarray(self.grip_offset, dtype=float)[:3, 3].copy()
-        if self.grip_translation_offset is None:
-            return
+            if self.gripped_object not in self.main_window.robot.links:
+                return
+            if self.grip_translation_offset is None:
+                if self.grip_offset is None:
+                    return
+                self.grip_translation_offset = np.asarray(self.grip_offset, dtype=float)[:3, 3].copy()
+            if self.grip_translation_offset is None:
+                return
 
-        obj_link = self.main_window.robot.links[self.gripped_object]
-        tcp_world = np.asarray(tcp_link.t_world, dtype=float)
-        carried_pose = np.eye(4)
-        carried_pose[:3, :3] = self._ground_aligned_object_rotation(obj_link)
-        carried_pose[:3, 3] = tcp_world[:3, 3] + self.grip_translation_offset
-        obj_link.t_offset = carried_pose
-        self.main_window.robot.update_kinematics()
-        self.main_window.canvas.update_transforms(self.main_window.robot)
-        self.main_window.simulation_tab.refresh_object_info(self.gripped_object)
+            obj_link = self.main_window.robot.links[self.gripped_object]
+            jaw_midpoint = self._current_gripper_jaw_midpoint_world(tcp_link)
+            tcp_world = np.asarray(jaw_midpoint if jaw_midpoint is not None else tcp_link.t_world[:3, 3], dtype=float).reshape(3)
+            carried_pose = np.eye(4)
+            carried_pose[:3, :3] = self._ground_aligned_object_rotation(obj_link)
+            carried_pose[:3, 3] = tcp_world + self.grip_translation_offset
+            obj_link.t_offset = carried_pose
+            self.main_window.robot.update_kinematics()
+            if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'update_transforms'):
+                self.main_window.canvas.update_transforms(self.main_window.robot)
+            if hasattr(self.main_window, 'simulation_tab') and hasattr(self.main_window.simulation_tab, 'refresh_object_info'):
+                self.main_window.simulation_tab.refresh_object_info(self.gripped_object)
+        except Exception as exc:
+            if hasattr(self.main_window, "log"):
+                self.main_window.log(f"Carry update skipped: {exc}")
 
     def _do_release(self):
-        """Opens gripper and drops the gripped object at P2 with its ORIGINAL orientation."""
+        """Opens gripper and drops the gripped object at P2 with the bottom face on the graph plane."""
         # Open fingers
         self.main_window._control_gripper_fingers(close=False)
         self.main_window.robot.update_kinematics()
@@ -2047,38 +2150,20 @@ class SimulationPanel(QtWidgets.QWidget):
 
         obj_link = self.main_window.robot.links[self.gripped_object]
         ratio = self.main_window.canvas.grid_units_per_cm
-
-        # Build final transform:
-        #   - Translation: P2 coordinates from the spinboxes (canvas units)
-        #   - Rotation: preserve the object's import-side orientation
-        t_release = np.eye(4)
-        t_release[:3, :3] = self._ground_aligned_object_rotation(obj_link)
-
-        # Place at P2 world position
-        # Align mesh BASE with P2 coordinates
-        p2_cm = np.array([self.place_x.value(), self.place_y.value(), self.place_z.value()])
-        p2_world = p2_cm * ratio
-        
-        if obj_link.mesh:
-            bounds = np.asarray(obj_link.mesh.bounds, dtype=float)
-            base_center_local = np.array([
-                0.5 * (bounds[0, 0] + bounds[1, 0]),
-                0.5 * (bounds[0, 1] + bounds[1, 1]),
-                bounds[0, 2],
-            ])
-            t_release[:3, 3] = p2_world - t_release[:3, :3] @ base_center_local
-        else:
-            t_release[:3, 3] = p2_world
+        p2_world = np.array([self.place_x.value(), self.place_y.value(), self.place_z.value()], dtype=float) * ratio
+        t_release = self._ground_aligned_object_pose(obj_link, p2_world)
         obj_link.t_offset = t_release
         self.main_window.robot.update_kinematics()
-        self.main_window.canvas.update_transforms(self.main_window.robot)
+        if hasattr(self.main_window, 'canvas') and hasattr(self.main_window.canvas, 'update_transforms'):
+            self.main_window.canvas.update_transforms(self.main_window.robot)
 
-        self.main_window.log(f"📦 RELEASED: '{self.gripped_object}' placed at P2 with original orientation.")
+        self.main_window.log(f"?? RELEASED: '{self.gripped_object}' placed at P2 with base face aligned to the graph.")
         self.main_window.show_toast(f"Placed {self.gripped_object} at P2", "success")
 
         self.gripped_object = None
         self.grip_offset = None
         self.grip_original_rotation = None
+        self.grip_locked_rotation = None
         self.grip_translation_offset = None
 
     def _on_task_completed(self):

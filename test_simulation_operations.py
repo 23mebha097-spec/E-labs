@@ -812,5 +812,80 @@ def test_imported_object_keeps_its_base_orientation_after_grip():
 
     panel._carry_gripped_object(SimpleNamespace(t_world=tcp_pose))
 
-    np.testing.assert_allclose(object_link.t_offset[:3, :3], np.eye(3))
+    np.testing.assert_allclose(object_link.t_offset[:3, :3], import_rotation)
     np.testing.assert_allclose(object_link.t_offset[:3, 3], [4.0, 5.0, 6.0])
+
+
+def test_grasped_object_keeps_locked_rotation_even_if_other_rotation_data_changes():
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    locked_rotation = np.array([
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ])
+    object_link = SimpleNamespace(
+        name="ob_1",
+        t_offset=np.eye(4),
+        import_metadata={"import_world_rotation": np.eye(3).tolist()},
+    )
+    mw = _main_window_stub()
+    mw.robot = SimpleNamespace(
+        links={"ob_1": object_link},
+        joints={},
+        joint_relations={},
+        update_kinematics=lambda: None,
+    )
+    mw.canvas = SimpleNamespace(update_transforms=lambda robot: None)
+    mw.simulation_tab = SimpleNamespace(refresh_object_info=lambda name: None)
+    panel = SimulationPanel(mw)
+    panel.gripped_object = "ob_1"
+    panel.grip_original_rotation = np.eye(3)
+    panel.grip_locked_rotation = locked_rotation
+    panel.grip_translation_offset = np.zeros(3)
+    object_link.import_metadata["import_world_rotation"] = np.diag([1.0, -1.0, -1.0]).tolist()
+
+    tcp_pose = np.eye(4)
+    tcp_pose[:3, 3] = [1.0, 2.0, 3.0]
+    panel._carry_gripped_object(SimpleNamespace(t_world=tcp_pose))
+
+    np.testing.assert_allclose(object_link.t_offset[:3, :3], locked_rotation)
+
+
+def test_release_pose_anchors_the_bottom_face_without_changing_rotation():
+    import trimesh
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    mesh = trimesh.creation.box(extents=[2.0, 4.0, 6.0])
+    object_link = SimpleNamespace(
+        name="ob_1",
+        mesh=mesh,
+        t_world=np.eye(4),
+        import_metadata={
+            "import_world_rotation": np.array([
+                [0.0, -1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]).tolist(),
+        },
+    )
+    mw = _main_window_stub()
+    mw.robot = SimpleNamespace(
+        links={"ob_1": object_link},
+        joints={},
+        joint_relations={},
+        update_kinematics=lambda: None,
+    )
+    mw.canvas = SimpleNamespace(update_transforms=lambda robot: None)
+    panel = SimulationPanel(mw)
+
+    pose = panel._ground_aligned_object_pose(object_link, np.array([10.0, 20.0, 30.0]))
+
+    np.testing.assert_allclose(
+        pose[:3, :3],
+        np.array([
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]),
+    )
+    np.testing.assert_allclose(pose[:3, 3], [10.0, 20.0, 33.0])
