@@ -77,10 +77,14 @@ class RobotCanvas(QtWidgets.QWidget):
         self.plotter.add_key_event("Escape", self.deselect_all)
 
         self.on_face_picked_callback = None
+        self.on_joint_face_picked_callback = None
+        self.on_actor_clicked_callback = None
         self.on_drop_callback = None
         self.on_deselect_callback = None
         self.picking_face = False
         self.picking_color = "orange"
+        self._face_picking_allowed_name = None
+        self._face_picking_keep_active = False
         self.enable_drag = True
         self._selection_dim_actors = []
         
@@ -116,7 +120,8 @@ class RobotCanvas(QtWidgets.QWidget):
             return True
         robot = getattr(self.window(), 'robot', None)
         if robot and name in robot.links:
-            return bool(robot.links[name].parent_joint)
+            link = robot.links[name]
+            return bool(link.is_base or link.parent_joint)
         return False
         self._workspace_plane_boundary_actor = None
         self._workspace_plane_visible = True
@@ -161,6 +166,12 @@ class RobotCanvas(QtWidgets.QWidget):
             link_name = next((name for name, a in self.actors.items() if a == actor), None)
             
             if link_name:
+                if self._face_picking_allowed_name and link_name != self._face_picking_allowed_name:
+                    self.mw_log(
+                        f"Face pick ignored. Expected '{self._face_picking_allowed_name}', but clicked '{link_name}'."
+                    )
+                    return False
+
                 # 0. IMPORTANT: Clean the mesh for connectivity! 
                 # STL meshes often have 'unwelded' vertices which break feature growth.
                 raw_mesh = pv.wrap(actor.GetMapper().GetInput())
@@ -220,11 +231,21 @@ class RobotCanvas(QtWidgets.QWidget):
                 # Visual Feedback: Show a small sphere at the PICKED CENTER
                 self.plotter.add_mesh(pv.Sphere(radius=0.3 * self.grid_units_per_cm, center=world_center), 
                                     color="white", name=f"pick_center_marker", pickable=False)
-                
-                if self.on_face_picked_callback:
+
+                preview_data = None
+                if self.on_joint_face_picked_callback is not None:
+                    preview_data = self._estimate_cylindrical_face_data(mesh, feature_cells, local_pick_pt, seed_normal, mat)
+                    self.on_joint_face_picked_callback(link_name, world_center, world_normal, preview_data)
+                elif self.on_face_picked_callback:
                     self.on_face_picked_callback(link_name, world_center, world_normal)
-                
+
+                if self._face_picking_keep_active:
+                    self.picking_face = True
+                    self.plotter.render()
+                    return True
+
                 self.picking_face = False
+                self._face_picking_allowed_name = None
                 self.plotter.render()
                 return True
         return False
@@ -453,12 +474,59 @@ class RobotCanvas(QtWidgets.QWidget):
             self.plotter.add_mesh(boundary_mesh, color=color, line_width=5,
                                 name=highlight_name, user_matrix=np_matrix, pickable=False)
 
+    def _remove_actor_safely(self, actor_name):
+        """Remove a renderer actor object from the scene without recursion."""
+        if not actor_name:
+            return False
+
+        renderer = getattr(self.plotter, "renderer", None)
+        if renderer is None:
+            return False
+
+        actors_map = getattr(renderer, "actors", {})
+        actor = None
+        if isinstance(actors_map, dict):
+            actor = actors_map.get(actor_name)
+        elif hasattr(actors_map, "get"):
+            try:
+                actor = actors_map.get(actor_name)
+            except Exception:
+                actor = None
+
+        if actor is None:
+            return False
+
+        try:
+            renderer.RemoveActor(actor)
+        except Exception:
+            return False
+
+        if isinstance(actors_map, dict):
+            actors_map.pop(actor_name, None)
+
+        actor_list = getattr(renderer, "_actors", None)
+        if actor_list is None:
+            return True
+
+        if hasattr(actor_list, "remove"):
+            try:
+                actor_list.remove(actor)
+            except ValueError:
+                pass
+        elif hasattr(actor_list, "pop"):
+            try:
+                actor_list.pop()
+            except Exception:
+                pass
+
+        return True
+
     def clear_highlights(self):
         """Removes all temporary selection markers (faces, arrows) from the scene."""
-        current_actors = list(self.plotter.renderer.actors.keys())
+        current_actors = list(getattr(self.plotter.renderer, "actors", {}).keys())
         for actor_name in current_actors:
             if "pick_highlight_" in actor_name or "pick_arrow_" in actor_name:
-                self.plotter.remove_actor(actor_name)
+                self._remove_actor_safely(actor_name)
         self.plotter.render()
 
     def resizeEvent(self, event):
@@ -490,12 +558,89 @@ class RobotCanvas(QtWidgets.QWidget):
         self.mw_log("Selection cleared.")
         self.setCursor(QtCore.Qt.ArrowCursor)
 
-    def start_face_picking(self, callback, color="orange"):
+    def start_face_picking(
+        self,
+        callback,
+        color="orange",
+        allowed_link_name=None,
+        keep_active=False,
+        highlight_prefix="pick",
+        center_mode=None,
+    ):
         """Activates specialized face picking mode."""
         self.on_face_picked_callback = callback
+        self.on_joint_face_picked_callback = None
         self.picking_face = True
         self.picking_color = color
-        self.mw_log(f"Face Picking Active: Click a face on the 3D model...")
+        self.highlight_prefix = highlight_prefix or "pick"
+        self.center_mode = center_mode or "feature"
+        self._face_picking_allowed_name = allowed_link_name
+        self._face_picking_keep_active = keep_active
+        if allowed_link_name:
+            self.mw_log(f"Face Picking Active: Click a face on '{allowed_link_name}'...")
+        else:
+            self.mw_log(f"Face Picking Active: Click a face on the 3D model...")
+
+    def start_joint_face_picking(self, callback, color="cyan", allowed_link_name=None):
+        """Activates face picking tuned for joint-axis detection from cylindrical faces."""
+        self.on_face_picked_callback = None
+        self.on_joint_face_picked_callback = callback
+        self.picking_face = True
+        self.picking_color = color
+        self._face_picking_allowed_name = allowed_link_name
+        self.mw_log("Joint Face Picking Active: Click a cylindrical face on the 3D model...")
+
+    def _estimate_cylindrical_face_data(self, mesh, feature_cells, local_pick_pt, seed_normal, mat):
+        """Estimate a joint origin and axis from a picked cylindrical feature cluster."""
+        pts = []
+        for cid in feature_cells:
+            cell = mesh.GetCell(cid)
+            for i in range(cell.GetNumberOfPoints()):
+                pts.append(np.array(mesh.GetPoint(cell.GetPointId(i)), dtype=float))
+
+        if len(pts) < 6:
+            return None
+
+        pts = np.array(pts, dtype=float)
+        center = np.mean(pts, axis=0)
+        centered = pts - center
+
+        if np.linalg.norm(centered) < 1e-9:
+            return None
+
+        _, _, vh = np.linalg.svd(centered)
+        axis_dir = vh[-1]
+        axis_dir = axis_dir / (np.linalg.norm(axis_dir) + 1e-9)
+
+        if np.linalg.norm(axis_dir) < 1e-9:
+            return None
+
+        if abs(np.dot(axis_dir, seed_normal)) > 0.3:
+            return None
+
+        variances = np.var(centered, axis=0)
+        if np.max(variances) < 1e-9 or np.min(variances) > 0.05 * np.max(variances):
+            return None
+
+        # Use the picked point as a point on the local cylinder axis if possible.
+        if len(feature_cells) > 0:
+            local_origin = center
+        else:
+            local_origin = local_pick_pt
+
+        rot = mat[:3, :3]
+        world_axis = rot @ axis_dir
+        world_axis /= np.linalg.norm(world_axis) + 1e-9
+        world_origin = (mat @ np.append(local_origin, 1.0))[:3]
+
+        return {
+            "is_cylindrical": True,
+            "origin": world_origin,
+            "axis": world_axis,
+            "local_origin": local_origin,
+            "local_axis": axis_dir,
+            "normal": (rot @ np.array(seed_normal, dtype=float)).astype(float),
+        }
 
     # ... [Existing events remain unchanged] ...
 
@@ -1099,6 +1244,14 @@ class RobotCanvas(QtWidgets.QWidget):
         self.mw_log(f"Click a 3D object to select it as {label}...")
         self.setCursor(QtCore.Qt.PointingHandCursor)
 
+    def start_actor_click_capture(self, callback):
+        """Capture every actor click until stopped."""
+        self.on_actor_clicked_callback = callback
+
+    def stop_actor_click_capture(self):
+        """Stop capturing actor clicks."""
+        self.on_actor_clicked_callback = None
+
     def start_object_picking_double(self, callback, label="Object"):
         """Activates double-click object picking - returns name without highlighting"""
         self.on_object_picked_callback = callback
@@ -1369,6 +1522,15 @@ class RobotCanvas(QtWidgets.QWidget):
                 if a == actor:
                     clicked_name = name
                     break
+
+            if clicked_name and self.on_actor_clicked_callback:
+                try:
+                    handled = bool(self.on_actor_clicked_callback(clicked_name))
+                except Exception as exc:
+                    self.mw_log(f"Rigid group selection error: {exc}")
+                    handled = False
+                if handled:
+                    return
             
             # --- SIMULATION MODE DRAG CONSTRAINT ---
             # In simulation mode, we only allow moving "simulation objects"
@@ -1431,7 +1593,7 @@ class RobotCanvas(QtWidgets.QWidget):
                     return
 
             # CHECK: Is this the Base Link? (Bases are fixed/non-pickable for dragging)
-            if clicked_name in self.fixed_actors:
+            if clicked_name in self.fixed_actors or self._is_locked_actor(clicked_name):
                 self.mw_log(f"⚠️ Locked: '{clicked_name}' is the Base and its position is frozen.")
                 # Just let the camera rotate, don't select or drag
                 self.plotter.interactor.GetInteractorStyle().OnLeftButtonDown()
@@ -1603,6 +1765,12 @@ class RobotCanvas(QtWidgets.QWidget):
                 mat[1, 3] += move_vector[1]
                 mat[2, 3] += move_vector[2]
                 actor.user_matrix = mat
+
+                if self.on_drop_callback and self.selected_name:
+                    try:
+                        self.on_drop_callback(self.selected_name, np.array(mat, dtype=float))
+                    except Exception:
+                        pass
                 
                 self.last_pos = curr_pos
                 self.plotter.render()
@@ -1718,7 +1886,7 @@ class RobotCanvas(QtWidgets.QWidget):
         if name in self.actors:
             if self.selected_name == name:
                 self.deselect_all()
-            self.plotter.remove_actor(self.actors[name])
+            self._remove_actor_safely(name)
             del self.actors[name]
             self.plotter.render()
 
@@ -1798,11 +1966,13 @@ class RobotCanvas(QtWidgets.QWidget):
         except Exception:
             pass
 
-    def update_hud_coords(self, x, y, z, render=True):
+    def update_hud_coords(self, x, y, z, status="LIVE", render=True):
         """Updates the Live Point HUD text on the 3D screen.
         
         Coordinates (x, y, z) are expected in centimeters and are displayed
         with one decimal place for a cleaner on-screen readout.
+        
+        status: Display status like "LIVE" or "🔒 LOCKED"
         """
         # Cache with full precision to catch actual coordinate changes
         rounded = (float(x), float(y), float(z))
@@ -1811,7 +1981,7 @@ class RobotCanvas(QtWidgets.QWidget):
         self._last_live_point_hud = rounded
         
         # Display with one decimal precision on screen.
-        text = f"LIVE POINT: X: {x:.1f}, Y: {y:.1f}, Z: {z:.1f} cm"
+        text = f"LIVE POINT [{status}]: X: {x:.1f}, Y: {y:.1f}, Z: {z:.1f} cm"
         self.plotter.add_text(
             text, 
             position='upper_left', 
@@ -2643,27 +2813,29 @@ class RobotCanvas(QtWidgets.QWidget):
 
     def update_live_tcp_marker(self, point_world):
         """Draws/updates the current TCP coordinates marker in world space."""
-        pt_scaled = point_world * self.grid_units_per_cm
+        pt_world = np.array(point_world, dtype=float)
         
         if hasattr(self, '_tcp_marker_actor') and self._tcp_marker_actor is not None:
             try:
                 mat = np.eye(4)
-                mat[:3, 3] = pt_scaled
+                mat[:3, 3] = pt_world
                 self._tcp_marker_actor.user_matrix = mat
                 return
             except Exception:
                 pass
                 
-        sphere = pv.Sphere(radius=1.3 * self.grid_units_per_cm, center=(0, 0, 0))
+        sphere = pv.Sphere(radius=1.8 * self.grid_units_per_cm, center=(0, 0, 0))
         self._tcp_marker_actor = self.plotter.add_mesh(
             sphere,
-            color="#e91e63", # Sleek Premium Magenta Glow
+            color="#d32f2f",
+            opacity=0.95,
+            smooth_shading=True,
             name="traj_tcp_marker",
             pickable=False,
             lighting=True
         )
         mat = np.eye(4)
-        mat[:3, 3] = pt_scaled
+        mat[:3, 3] = pt_world
         self._tcp_marker_actor.user_matrix = mat
 
     def clear_live_tcp_marker(self):
@@ -2680,7 +2852,7 @@ class RobotCanvas(QtWidgets.QWidget):
         """Adds a coordinate position to the live TCP toolpath trail."""
         if not hasattr(self, '_live_tcp_trail_pts'):
             self._live_tcp_trail_pts = []
-        self._live_tcp_trail_pts.append(pt_world * self.grid_units_per_cm)
+        self._live_tcp_trail_pts.append(np.array(pt_world, dtype=float))
         if len(self._live_tcp_trail_pts) > 500:
             self._live_tcp_trail_pts.pop(0)
             
@@ -2838,27 +3010,29 @@ pickable=False,
 
     def update_live_tcp_marker(self, point_world):
         """Draws/updates the current TCP coordinates marker in world space."""
-        pt_scaled = point_world * self.grid_units_per_cm
+        pt_world = np.array(point_world, dtype=float)
         
         if hasattr(self, '_tcp_marker_actor') and self._tcp_marker_actor is not None:
             try:
                 mat = np.eye(4)
-                mat[:3, 3] = pt_scaled
+                mat[:3, 3] = pt_world
                 self._tcp_marker_actor.user_matrix = mat
                 return
             except Exception:
                 pass
                 
-        sphere = pv.Sphere(radius=1.3 * self.grid_units_per_cm, center=(0, 0, 0))
+        sphere = pv.Sphere(radius=1.8 * self.grid_units_per_cm, center=(0, 0, 0))
         self._tcp_marker_actor = self.plotter.add_mesh(
             sphere,
-            color="#e91e63", # Sleek Premium Magenta Glow
+            color="#d32f2f",
+            opacity=0.95,
+            smooth_shading=True,
             name="traj_tcp_marker",
             pickable=False,
             lighting=True
         )
         mat = np.eye(4)
-        mat[:3, 3] = pt_scaled
+        mat[:3, 3] = pt_world
         self._tcp_marker_actor.user_matrix = mat
 
     def clear_live_tcp_marker(self):
@@ -2875,7 +3049,7 @@ pickable=False,
         """Adds a coordinate position to the live TCP toolpath trail."""
         if not hasattr(self, '_live_tcp_trail_pts'):
             self._live_tcp_trail_pts = []
-        self._live_tcp_trail_pts.append(pt_world * self.grid_units_per_cm)
+        self._live_tcp_trail_pts.append(np.array(pt_world, dtype=float))
         if len(self._live_tcp_trail_pts) > 500:
             self._live_tcp_trail_pts.pop(0)
             
@@ -2997,6 +3171,188 @@ pickable=False,
         """Set camera to standard isometric view."""
         self.plotter.camera.SetParallelProjection(False)
         self.plotter.view_isometric()
+        self.plotter.render()
+
+    def highlight_face(self, link_name: str, face_id: int, color: str = "green"):
+        """Highlight a specific mesh face with the given color.
+        
+        Args:
+            link_name: Name of the link containing the mesh
+            face_id: Face ID in the mesh
+            color: Color name (yellow, green, red, etc.)
+        """
+        try:
+            if link_name not in self.actors:
+                return
+            
+            actor = self.actors[link_name]
+            if actor is None:
+                return
+            
+            # Map PyVista color names to RGB tuples
+            color_map = {
+                "yellow": (1.0, 1.0, 0.0),
+                "green": (0.0, 1.0, 0.0),
+                "red": (1.0, 0.0, 0.0),
+                "blue": (0.0, 0.0, 1.0),
+                "cyan": (0.0, 1.0, 1.0),
+                "magenta": (1.0, 0.0, 1.0),
+                "white": (1.0, 1.0, 1.0),
+                "orange": (1.0, 0.65, 0.0),
+            }
+            
+            rgb = color_map.get(color.lower(), (0.5, 0.5, 0.5))
+            
+            # Store the highlight for later removal
+            highlight_name = f"highlight_face_{link_name}_{face_id}"
+            
+            # Get the mesh and extract the face
+            if not hasattr(self, 'mw') or self.mw is None:
+                # Fallback if mw is not available
+                return
+            
+            if link_name not in self.mw.robot.links:
+                return
+            
+            link = self.mw.robot.links[link_name]
+            if not hasattr(link, 'mesh'):
+                return
+            
+            mesh = link.mesh
+            try:
+                face_mesh = mesh.extract_cells([face_id])
+                if face_mesh is not None and face_mesh.n_cells > 0:
+                    # Get actor transform
+                    transform = np.array(actor.user_matrix) if hasattr(actor, 'user_matrix') else np.eye(4)
+                    
+                    # Add highlight mesh
+                    self.plotter.add_mesh(
+                        face_mesh,
+                        color=rgb,
+                        opacity=0.7,
+                        name=highlight_name,
+                        user_matrix=transform,
+                        pickable=False,
+                        lighting=False,
+                    )
+                    self.plotter.render()
+            except Exception:
+                pass
+        except Exception:
+            pass
+    
+    def reset_face_color(self, link_name: str, face_id: int):
+        """Reset a highlighted face to its default color (remove highlight).
+        
+        Args:
+            link_name: Name of the link containing the mesh
+            face_id: Face ID in the mesh
+        """
+        highlight_name = f"highlight_face_{link_name}_{face_id}"
+        if self._remove_actor_safely(highlight_name):
+            self.plotter.render()
+    
+    def highlight_surface_candidate(self, link_name: str, candidate: dict) -> bool:
+        """Highlight a surface candidate (used for surface selection UI).
+        
+        Args:
+            link_name: Name of the link
+            candidate: Candidate dict with face indices
+            
+        Returns:
+            True if highlight was applied, False otherwise
+        """
+        if not isinstance(candidate, dict):
+            self.clear_highlights()
+            return False
+        
+        face_indices = candidate.get('mesh_face_indices', [])
+        if not face_indices:
+            return False
+        
+        try:
+            link = self.mw.robot.links.get(link_name) if hasattr(self, 'mw') else None
+            if link is None or not hasattr(link, 'mesh'):
+                return False
+            
+            mesh = link.mesh
+            face_mesh = mesh.extract_cells(face_indices)
+            
+            if face_mesh and face_mesh.n_cells > 0:
+                # Get actor transform
+                if link_name in self.actors:
+                    actor = self.actors[link_name]
+                    transform = np.array(actor.user_matrix) if hasattr(actor, 'user_matrix') else np.eye(4)
+                else:
+                    transform = np.eye(4)
+                
+                # Add highlight
+                self.plotter.add_mesh(
+                    face_mesh,
+                    color="cyan",
+                    opacity=0.5,
+                    name=f"candidate_highlight_{link_name}",
+                    user_matrix=transform,
+                    pickable=False,
+                    lighting=False,
+                )
+                self.plotter.render()
+                return True
+        except Exception:
+            pass
+        
+        return False
+    
+    def show_selected_gripping_faces(self, primary_candidate: dict, secondary_candidate: dict = None):
+        """Display selected gripping faces with visual feedback.
+        
+        Args:
+            primary_candidate: Primary gripping surface candidate dict
+            secondary_candidate: Optional secondary gripping surface candidate dict
+        """
+        # Clear previous overlays
+        self.clear_selected_face_overlays()
+        
+        if primary_candidate and isinstance(primary_candidate, dict):
+            link_name = primary_candidate.get('link_name')
+            self.highlight_surface_candidate(link_name, primary_candidate)
+        
+        if secondary_candidate and isinstance(secondary_candidate, dict):
+            link_name = secondary_candidate.get('link_name')
+            if link_name and link_name in self.actors:
+                try:
+                    link = self.mw.robot.links.get(link_name) if hasattr(self, 'mw') else None
+                    if link and hasattr(link, 'mesh'):
+                        mesh = link.mesh
+                        face_indices = secondary_candidate.get('mesh_face_indices', [])
+                        if face_indices:
+                            face_mesh = mesh.extract_cells(face_indices)
+                            if face_mesh and face_mesh.n_cells > 0:
+                                actor = self.actors[link_name]
+                                transform = np.array(actor.user_matrix) if hasattr(actor, 'user_matrix') else np.eye(4)
+                                self.plotter.add_mesh(
+                                    face_mesh,
+                                    color="lime",
+                                    opacity=0.4,
+                                    name=f"secondary_highlight_{link_name}",
+                                    user_matrix=transform,
+                                    pickable=False,
+                                    lighting=False,
+                                )
+                except Exception:
+                    pass
+        
+        self.plotter.render()
+    
+    def clear_selected_face_overlays(self):
+        """Clear all selected face highlight overlays."""
+        current_actors = list(self.plotter.renderer.actors.keys())
+        for actor_name in current_actors:
+            if "highlight_" in actor_name or "secondary_highlight_" in actor_name or "candidate_highlight_" in actor_name:
+                try:
+                    self.plotter.remove_actor(actor_name)
+                except Exception:
+                    pass
         self.plotter.render()
 
     def view_front(self):

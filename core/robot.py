@@ -103,17 +103,29 @@ class Joint:
         self.min_limit = -180.0
         self.max_limit = 180.0
         self.current_value = 0.0
+        self.linear_units_per_cm = 10.0
 
         parent_link.child_joints.append(self)
         child_link.parent_joint = self
 
     def get_matrix(self):
-        theta = np.radians(self.current_value)
-        rotation = self._rotation_matrix(self.axis, theta)
+        joint_type = str(self.joint_type or "revolute").lower()
+        if joint_type == "fixed":
+            return np.eye(4)
         t_origin = np.eye(4)
         t_origin[:3, 3] = self.origin
         t_origin_inv = np.eye(4)
         t_origin_inv[:3, 3] = -self.origin
+
+        if joint_type == "prismatic":
+            axis = np.array(self.axis, dtype=float)
+            axis = axis / (np.linalg.norm(axis) + 1e-9)
+            translation = np.eye(4)
+            translation[:3, 3] = axis * float(self.current_value) * float(self.linear_units_per_cm)
+            return t_origin @ translation @ t_origin_inv
+
+        theta = np.radians(self.current_value)
+        rotation = self._rotation_matrix(self.axis, theta)
         return t_origin @ rotation @ t_origin_inv
 
     def _rotation_matrix(self, axis, theta):
@@ -154,17 +166,12 @@ class Robot:
                 joint.current_value = home_angle
         self.update_kinematics()
 
-    def add_joint_relation(self, master, slave, ratio=1.0):
-        if master not in self.joint_relations:
-            self.joint_relations[master] = []
-        self.joint_relations[master].append((slave, ratio))
-
     def add_link(self, name, mesh=None):
         link = Link(name, mesh)
         self.links[name] = link
         return link
 
-    def add_joint(self, name, parent_name, child_name):
+    def add_joint(self, name, parent_name, child_name, joint_type="revolute"):
         parent = self.links[parent_name]
         child = self.links[child_name]
 
@@ -174,9 +181,109 @@ class Robot:
             for joint_name in names_to_remove:
                 self.remove_joint(joint_name)
 
-        joint = Joint(name, parent, child)
+        joint = Joint(name, parent, child, joint_type=joint_type)
         self.joints[name] = joint
         return joint
+
+    def is_descendant(self, possible_descendant_name, ancestor_name):
+        """Return True when a link is already below another link in the kinematic tree."""
+        if possible_descendant_name == ancestor_name:
+            return True
+        ancestor = self.links.get(ancestor_name)
+        if ancestor is None:
+            return False
+
+        stack = [joint.child_link for joint in getattr(ancestor, "child_joints", []) or [] if joint.child_link is not None]
+        seen = set()
+        while stack:
+            link = stack.pop()
+            if link.name in seen:
+                continue
+            if link.name == possible_descendant_name:
+                return True
+            seen.add(link.name)
+            stack.extend(
+                joint.child_link
+                for joint in getattr(link, "child_joints", []) or []
+                if joint.child_link is not None
+            )
+        return False
+
+    def ensure_fixed_joint(self, parent_name, child_name, child_world_transform=None, origin_world=None):
+        """Attach a link rigidly to a parent without creating a user-controlled joint."""
+        if parent_name not in self.links or child_name not in self.links or parent_name == child_name:
+            return None
+        if self.is_descendant(parent_name, child_name):
+            return None
+
+        parent = self.links[parent_name]
+        child = self.links[child_name]
+        existing = getattr(child, "parent_joint", None)
+        if existing is not None and getattr(existing, "joint_type", None) != "fixed":
+            return existing
+        if existing is not None and getattr(existing.parent_link, "name", None) == parent_name:
+            return existing
+
+        parent_world = np.array(parent.t_world, dtype=float).copy()
+        if child_world_transform is None:
+            child_world = np.array(child.t_world, dtype=float).copy()
+        else:
+            child_world = np.array(child_world_transform, dtype=float).copy()
+
+        joint_name_base = f"rigid__{parent_name}__{child_name}"
+        joint_name = joint_name_base
+        suffix = 1
+        while joint_name in self.joints and self.joints[joint_name] is not existing:
+            joint_name = f"{joint_name_base}_{suffix}"
+            suffix += 1
+
+        joint = self.add_joint(joint_name, parent_name, child_name, joint_type="fixed")
+        joint.current_value = 0.0
+        joint.axis = np.array([0.0, 0.0, 1.0], dtype=float)
+        joint.axis_name = "Z"
+        joint.is_rigid_attachment = True
+        if origin_world is not None:
+            joint.origin = (np.linalg.inv(parent_world) @ np.append(np.array(origin_world, dtype=float), 1.0))[:3]
+        else:
+            joint.origin = np.zeros(3, dtype=float)
+        child.t_offset = np.linalg.inv(parent_world) @ child_world
+        return joint
+
+    def rigidize_alignment_cache(self, alignment_cache):
+        """Convert saved parent-child alignments into fixed joints for unjointed parts."""
+        if not isinstance(alignment_cache, dict):
+            return 0
+
+        created = 0
+        # A few passes allow base -> arm -> bracket style cached alignments to
+        # become one rigid subtree even when the cache order is arbitrary.
+        for _ in range(max(1, len(alignment_cache))):
+            changed = False
+            for key, point in list(alignment_cache.items()):
+                if not isinstance(key, tuple) or len(key) != 2:
+                    continue
+                parent_name, child_name = key
+                if parent_name not in self.links or child_name not in self.links:
+                    continue
+                child = self.links[child_name]
+                existing = getattr(child, "parent_joint", None)
+                if existing is not None and getattr(existing, "joint_type", None) != "fixed":
+                    continue
+                before = existing
+                joint = self.ensure_fixed_joint(
+                    parent_name,
+                    child_name,
+                    child_world_transform=np.array(child.t_world, dtype=float).copy(),
+                    origin_world=point,
+                )
+                if joint is not None and joint is not before:
+                    created += 1
+                    changed = True
+            if not changed:
+                break
+        if created:
+            self.update_kinematics()
+        return created
 
     def remove_link(self, name):
         if name not in self.links:
@@ -214,11 +321,6 @@ class Robot:
             parent.child_joints.remove(joint)
         child.parent_joint = None
 
-        if name in self.joint_relations:
-            del self.joint_relations[name]
-        for master, slaves in self.joint_relations.items():
-            self.joint_relations[master] = [(slave, ratio) for slave, ratio in slaves if slave != name]
-
         del self.joints[name]
         self.update_kinematics()
 
@@ -254,6 +356,16 @@ class Robot:
         if rpy_deg is not None:
             link.custom_tcp_rpy_deg = list(np.array(rpy_deg, dtype=float))
         return True
+
+    def ensure_tcp_transform(self, tcp_link):
+        if tcp_link is None:
+            return None
+        if getattr(tcp_link, "custom_tcp_offset", None) is not None:
+            if getattr(tcp_link, "auto_tcp_offset", None) is None:
+                tcp_link.auto_tcp_offset = np.array(tcp_link.custom_tcp_offset, dtype=float).copy()
+        elif getattr(tcp_link, "auto_tcp_offset", None) is None:
+            tcp_link.auto_tcp_offset = np.zeros(3, dtype=float)
+        return self.get_tcp_local_transform(tcp_link)
 
     def get_tcp_local_transform(self, tcp_link):
         if tcp_link is None:
@@ -435,14 +547,6 @@ class Robot:
         for joint, value in zip(chain, values_deg):
             clamped = np.clip(value, joint.min_limit, joint.max_limit)
             joint.current_value = clamped
-            if joint.name in self.joint_relations:
-                for slave_id, ratio in self.joint_relations[joint.name]:
-                    if slave_id in self.joints:
-                        self.joints[slave_id].current_value = np.clip(
-                            clamped * ratio,
-                            self.joints[slave_id].min_limit,
-                            self.joints[slave_id].max_limit,
-                        )
         self.update_kinematics()
 
     def _current_joint_vector(self, chain):
@@ -479,42 +583,6 @@ class Robot:
 
         joint = self.joints[joint_name]
         joint.current_value = float(np.clip(value, joint.min_limit, joint.max_limit))
-
-        if propagate_relations:
-            if joint_name in self.joint_relations:
-                for slave_id, ratio in self.joint_relations[joint_name]:
-                    if slave_id in self.joints:
-                        slave_joint = self.joints[slave_id]
-                        slave_joint.current_value = float(
-                            np.clip(
-                                joint.current_value * ratio,
-                                slave_joint.min_limit,
-                                slave_joint.max_limit,
-                            )
-                        )
-            else:
-                for master_id, slaves in self.joint_relations.items():
-                    for slave_id, ratio in slaves:
-                        if slave_id == joint_name and abs(ratio) > 1e-9 and master_id in self.joints:
-                            master_joint = self.joints[master_id]
-                            master_joint.current_value = float(
-                                np.clip(
-                                    joint.current_value / ratio,
-                                    master_joint.min_limit,
-                                    master_joint.max_limit,
-                                )
-                            )
-                            for sibling_id, sibling_ratio in self.joint_relations.get(master_id, []):
-                                if sibling_id in self.joints:
-                                    sibling_joint = self.joints[sibling_id]
-                                    sibling_joint.current_value = float(
-                                        np.clip(
-                                            master_joint.current_value * sibling_ratio,
-                                            sibling_joint.min_limit,
-                                            sibling_joint.max_limit,
-                                        )
-                                    )
-                            break
 
         self.update_kinematics()
         return True
@@ -1320,6 +1388,232 @@ class Robot:
                 "workspace_seed_count": len(self._workspace_seed_vectors(target_tcp_pose, chain, tcp_link, top_k=8)),
                 "optimizer_calls": optimizer_calls,
                 "best_error_vector": None if best_err6 is None else best_err6.copy(),
+            }
+        except Exception:
+            for name, value in old_values.items():
+                self.joints[name].current_value = value
+            self.update_kinematics()
+            raise
+
+    def inverse_kinematics_axis(
+        self,
+        target_position,
+        tcp_link,
+        tcp_axis_local,
+        target_axis_world,
+        max_iters=900,
+        position_tolerance=0.1,
+        axis_tolerance=0.1,
+        axis_weight=0.8,
+        joint_change_weight=0.12,
+    ):
+        """Solve TCP position while leaving rotation around one aligned axis free."""
+        if tcp_link is None:
+            return False, {"reason": "missing_tcp"}
+
+        chain = self.get_kinematic_chain(tcp_link)
+        if not chain:
+            return False, {"reason": "empty_chain"}
+
+        target_position = np.asarray(target_position, dtype=float).reshape(3)
+        tcp_axis_local = np.asarray(tcp_axis_local, dtype=float).reshape(3)
+        target_axis_world = np.asarray(target_axis_world, dtype=float).reshape(3)
+        local_length = float(np.linalg.norm(tcp_axis_local))
+        target_length = float(np.linalg.norm(target_axis_world))
+        if local_length <= 1e-9 or target_length <= 1e-9:
+            return False, {"reason": "invalid_axis"}
+        tcp_axis_local /= local_length
+        target_axis_world /= target_length
+
+        old_values = {name: joint.current_value for name, joint in self.joints.items()}
+        mins, maxs = self._joint_bounds(chain)
+        reference_vector = self._current_joint_vector(chain)
+        joint_span = np.maximum(maxs - mins, 1.0)
+
+        current_pose = self.get_tcp_world_pose(tcp_link)
+        current_axis = current_pose[:3, :3] @ tcp_axis_local
+        # A selected face represents a plane. Keep whichever normal direction
+        # requires less motion while leaving roll about that normal unconstrained.
+        if np.dot(current_axis, target_axis_world) < 0.0:
+            target_axis_world = -target_axis_world
+
+        seed_pose = current_pose.copy()
+        seed_pose[:3, 3] = target_position
+        seeds = self._merge_seed_lists(
+            self._experience_seed_vectors(seed_pose, chain, tcp_link, top_k=8),
+            self._workspace_seed_vectors(seed_pose, chain, tcp_link, top_k=8),
+            self._seed_joint_vectors(chain),
+        )
+        iterations_per_seed = max(20, int(np.ceil(max_iters / max(len(seeds), 1))))
+        axis_scale = max(float(position_tolerance), 1.0) * max(float(axis_weight), 1e-3)
+        best_vector = reference_vector.copy()
+        best_rank = (1, np.inf, np.inf, np.inf, np.inf)
+        best_position_error = np.inf
+        best_axis_error = np.inf
+        best_motion_stats = self._joint_motion_stats(
+            chain, best_vector, reference_vector, joint_span
+        )
+        optimizer_calls = 0
+
+        def evaluate(vector):
+            self._apply_joint_vector(chain, vector)
+            pose = self.get_tcp_world_pose(tcp_link)
+            actual_axis = pose[:3, :3] @ tcp_axis_local
+            actual_axis /= max(float(np.linalg.norm(actual_axis)), 1e-12)
+            position_error = float(np.linalg.norm(target_position - pose[:3, 3]))
+            axis_error = float(
+                np.arccos(
+                    np.clip(abs(np.dot(actual_axis, target_axis_world)), 0.0, 1.0)
+                )
+            )
+            motion_stats = self._joint_motion_stats(
+                chain, vector, reference_vector, joint_span
+            )
+            reachable = (
+                position_error <= position_tolerance and axis_error <= axis_tolerance
+            )
+            rank = (
+                0 if reachable else 1,
+                position_error,
+                axis_error,
+                motion_stats["total_abs"],
+                self._posture_penalty(chain, vector),
+            )
+            return rank, position_error, axis_error, motion_stats
+
+        def consider(vector):
+            nonlocal best_vector
+            nonlocal best_rank
+            nonlocal best_position_error
+            nonlocal best_axis_error
+            nonlocal best_motion_stats
+            rank, position_error, axis_error, motion_stats = evaluate(vector)
+            if rank < best_rank:
+                best_rank = rank
+                best_vector = np.asarray(vector, dtype=float).copy()
+                best_position_error = position_error
+                best_axis_error = axis_error
+                best_motion_stats = motion_stats
+            return rank[0] == 0
+
+        try:
+            for seed in seeds:
+                current = np.clip(np.asarray(seed, dtype=float), mins, maxs)
+
+                if least_squares is not None:
+                    def residual(vector):
+                        clipped = np.clip(vector, mins, maxs)
+                        self._apply_joint_vector(chain, clipped)
+                        pose = self.get_tcp_world_pose(tcp_link)
+                        actual_axis = pose[:3, :3] @ tcp_axis_local
+                        actual_axis /= max(float(np.linalg.norm(actual_axis)), 1e-12)
+                        base_residual = np.concatenate([
+                            pose[:3, 3] - target_position,
+                            axis_scale * np.cross(actual_axis, target_axis_world),
+                        ])
+                        if joint_change_weight <= 1e-12:
+                            return base_residual
+                        motion_residual = np.sqrt(joint_change_weight) * (
+                            (clipped - reference_vector) / joint_span
+                        )
+                        return np.concatenate([base_residual, motion_residual])
+
+                    result = least_squares(
+                        residual,
+                        x0=current,
+                        bounds=(mins, maxs),
+                        method="trf",
+                        x_scale="jac",
+                        loss="linear",
+                        max_nfev=max(60, iterations_per_seed * 4),
+                        ftol=1e-6,
+                        xtol=1e-6,
+                        gtol=1e-6,
+                    )
+                    optimizer_calls += 1
+                    current = np.clip(np.asarray(result.x, dtype=float), mins, maxs)
+                    if consider(current):
+                        break
+
+                # Keep a damped-least-squares fallback for installations without
+                # SciPy and for difficult seeds that need a small local refinement.
+                damping = 5e-2
+                for _ in range(iterations_per_seed):
+                    self._apply_joint_vector(chain, current)
+                    pose = self.get_tcp_world_pose(tcp_link)
+                    actual_axis = pose[:3, :3] @ tcp_axis_local
+                    actual_axis /= max(float(np.linalg.norm(actual_axis)), 1e-12)
+                    position_delta = target_position - pose[:3, 3]
+                    axis_delta = np.cross(actual_axis, target_axis_world)
+                    position_error = float(np.linalg.norm(position_delta))
+                    axis_error = float(
+                        np.arccos(
+                            np.clip(
+                                abs(np.dot(actual_axis, target_axis_world)),
+                                0.0,
+                                1.0,
+                            )
+                        )
+                    )
+                    if consider(current):
+                        break
+
+                    jacobian = self._compute_pose_jacobian(
+                        chain, tcp_link, use_tcp=True
+                    )
+                    weighted_jacobian = np.vstack([
+                        jacobian[:3],
+                        axis_scale * jacobian[3:],
+                    ])
+                    weighted_error = np.concatenate([
+                        position_delta,
+                        axis_scale * axis_delta,
+                    ])
+                    regularizer = np.zeros(len(chain), dtype=float)
+                    if joint_change_weight > 1e-12:
+                        regularizer = joint_change_weight / (joint_span ** 2)
+                    lhs = (
+                        weighted_jacobian.T @ weighted_jacobian
+                        + (damping * damping) * np.eye(len(chain))
+                        + np.diag(regularizer)
+                    )
+                    rhs = (
+                        weighted_jacobian.T @ weighted_error
+                        + regularizer * (reference_vector - current)
+                    )
+                    step = np.clip(np.linalg.solve(lhs, rhs), -6.0, 6.0)
+                    trial = np.clip(current + step, mins, maxs)
+                    trial_rank, trial_position_error, trial_axis_error, _ = evaluate(trial)
+                    current_score = position_error + (axis_scale * axis_error)
+                    trial_score = trial_position_error + (axis_scale * trial_axis_error)
+                    if trial_rank[0] == 0 or trial_score < current_score:
+                        current = trial
+                        damping = max(damping * 0.7, 1e-4)
+                    else:
+                        current = np.clip(current + (0.2 * step), mins, maxs)
+                        damping = min(damping * 1.8, 25.0)
+
+                if best_rank[0] == 0:
+                    break
+
+            self._apply_joint_vector(chain, best_vector)
+            tcp_pose = self.get_tcp_world_pose(tcp_link)
+            success = best_rank[0] == 0
+            if success:
+                self.remember_ik_solution(chain, tcp_link, tcp_pose, best_vector)
+            return success, {
+                "tcp_pose": tcp_pose,
+                "joint_values": {
+                    joint.name: joint.current_value for joint in chain
+                },
+                "position_error": float(best_position_error),
+                "axis_error": float(best_axis_error),
+                "orientation_error": float(best_axis_error),
+                "motion_score": float(best_motion_stats["normalized_l2"]),
+                "motion_total_abs_deg": float(best_motion_stats["total_abs"]),
+                "motion_max_abs_deg": float(best_motion_stats["max_abs"]),
+                "seed_count": len(seeds),
+                "optimizer_calls": optimizer_calls,
             }
         except Exception:
             for name, value in old_values.items():

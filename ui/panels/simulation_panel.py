@@ -18,6 +18,14 @@ class SimulationPanel(QtWidgets.QWidget):
         
         self._target_gripper_angles = {} # For smooth finger animation
         self._env_collision_manager = None # Performance Cache for Rigid Rigidity
+        self._pick_place_tcp_orientation = None
+        self._pick_place_original_object_rotation = None
+        self.grip_original_rotation = None
+        self.grip_translation_offset = None
+        
+        # Live Point Locking
+        self.live_point_locked = False  # Is LP currently locked?
+        self.locked_live_point = None   # Fixed [x, y, z] in cm when locked
         
         self.init_ui()
 
@@ -115,8 +123,78 @@ class SimulationPanel(QtWidgets.QWidget):
             }
             QPushButton:hover { background-color: #e3f2fd; }
         """)
-        self.import_btn.clicked.connect(self.main_window.import_mesh)
+        self.import_btn.clicked.connect(self.import_simulation_object)
         btn_layout.addWidget(self.import_btn)
+
+        operation_group = QtWidgets.QGroupBox("OBJECT OPERATION")
+        operation_group.setStyleSheet("""
+            QGroupBox {
+                border: 1px solid #cfd8dc;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 12px;
+                font-weight: bold;
+                color: #37474f;
+            }
+        """)
+        operation_layout = QtWidgets.QVBoxLayout(operation_group)
+        operation_layout.setSpacing(7)
+
+        self.operation_combo = QtWidgets.QComboBox()
+        self.operation_combo.setFixedHeight(36)
+        self.operation_combo.addItem("Pick & Place", "pick_place")
+        self.operation_combo.addItem("Welding", "welding")
+        self.operation_combo.addItem("Painting", "painting")
+        self.operation_combo.setStyleSheet("""
+            QComboBox {
+                background: white;
+                border: 1px solid #90a4ae;
+                border-radius: 6px;
+                padding: 5px 10px;
+                font-size: 13px;
+                font-weight: bold;
+                color: #263238;
+            }
+        """)
+        self.operation_combo.currentIndexChanged.connect(self._on_operation_changed)
+        operation_layout.addWidget(self.operation_combo)
+
+        self.operation_help = QtWidgets.QLabel()
+        self.operation_help.setWordWrap(True)
+        self.operation_help.setStyleSheet("color: #607d8b; font-size: 11px;")
+        operation_layout.addWidget(self.operation_help)
+
+        process_row = QtWidgets.QHBoxLayout()
+        self.process_points_label = QtWidgets.QLabel("Path points")
+        self.process_points_label.setStyleSheet("color: #455a64; font-size: 12px;")
+        self.process_points_sb = QtWidgets.QSpinBox()
+        self.process_points_sb.setRange(2, 40)
+        self.process_points_sb.setValue(8)
+        self.process_points_sb.setToolTip("Number of evenly spaced tool positions between P1 and P2")
+        process_row.addWidget(self.process_points_label)
+        process_row.addWidget(self.process_points_sb)
+        process_row.addStretch()
+        operation_layout.addLayout(process_row)
+
+        paint_row = QtWidgets.QHBoxLayout()
+        self.paint_color_label = QtWidgets.QLabel("Paint colour")
+        self.paint_color_label.setStyleSheet("color: #455a64; font-size: 12px;")
+        self.paint_color_combo = QtWidgets.QComboBox()
+        self.paint_color_combo.addItem("Safety Yellow", "#f9a825")
+        self.paint_color_combo.addItem("Signal Blue", "#1976d2")
+        self.paint_color_combo.addItem("Machine Red", "#d32f2f")
+        self.paint_color_combo.addItem("Industrial Green", "#388e3c")
+        paint_row.addWidget(self.paint_color_label)
+        paint_row.addWidget(self.paint_color_combo, 1)
+        operation_layout.addLayout(paint_row)
+
+        self.operation_status = QtWidgets.QLabel("Ready to configure Pick & Place")
+        self.operation_status.setWordWrap(True)
+        self.operation_status.setStyleSheet(
+            "background: #eceff1; color: #455a64; border-radius: 5px; padding: 7px; font-size: 11px;"
+        )
+        operation_layout.addWidget(self.operation_status)
+        btn_layout.addWidget(operation_group)
 
         self.update_btn = QtWidgets.QPushButton("🔄 Update Position")
         self.update_btn.setFixedHeight(45)
@@ -136,27 +214,43 @@ class SimulationPanel(QtWidgets.QWidget):
         self.update_btn.clicked.connect(self.update_object_position)
         btn_layout.addWidget(self.update_btn)
 
-        self.start_btn = QtWidgets.QPushButton("🚀 Start Simulation")
-        self.start_btn.setFixedHeight(45)
-        self.start_btn.setCheckable(True)
-        self.start_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.start_btn.setToolTip("Enable automatic pick-and-place tracking between P1 and P2")
-        self.start_btn.setStyleSheet("""
+        self.pick_place_btn = QtWidgets.QPushButton("Run Pick & Place")
+        self.pick_place_btn.setFixedHeight(45)
+        self.pick_place_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.pick_place_btn.setToolTip("Run the pick-and-place sequence using the selected object, P1, and P2")
+        self.pick_place_btn.setStyleSheet("""
             QPushButton {
-                background-color: #fdd835;
-                color: #212121;
+                background-color: #388e3c;
+                color: white;
                 border: none;
                 border-radius: 8px;
                 font-weight: bold;
                 font-size: 14px;
             }
-            QPushButton:checked {
-                background-color: #ff9800;
-                color: white;
-            }
-            QPushButton:hover { background-color: #fbc02d; }
+            QPushButton:hover { background-color: #2e7d32; }
+            QPushButton:pressed { background-color: #1b5e20; }
         """)
-        self.start_btn.clicked.connect(self.toggle_pick_place_sim)
+        self.pick_place_btn.clicked.connect(self.run_selected_operation)
+        btn_layout.addWidget(self.pick_place_btn)
+
+        self.start_btn = QtWidgets.QPushButton("Stop Operation")
+        self.start_btn.setFixedHeight(38)
+        self.start_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.start_btn.setToolTip("Stop the active object operation")
+        self.start_btn.setEnabled(False)
+        self.start_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                color: #c62828;
+                border: 1px solid #c62828;
+                border-radius: 8px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #ffebee; }
+            QPushButton:disabled { color: #b0bec5; border-color: #cfd8dc; }
+        """)
+        self.start_btn.clicked.connect(self.stop_current_operation)
         btn_layout.addWidget(self.start_btn)
 
         self.objects_layout.addWidget(btn_container)
@@ -165,6 +259,7 @@ class SimulationPanel(QtWidgets.QWidget):
         self.is_sim_active = False
         self.gripped_object = None
         self.grip_offset = None # Relative transform
+        self.grip_translation_offset = None
         
         self.sim_timer = QtCore.QTimer(self)
         self.sim_timer.timeout.connect(self._on_sim_tick)
@@ -175,6 +270,10 @@ class SimulationPanel(QtWidgets.QWidget):
         self.active_joint_index = 0
         self.current_tcp = None
         self.motion_speed = 5.0 # Initial default
+        self.active_operation = None
+        self._process_path_cm = []
+        self._process_path_index = 0
+        self._process_trace_points_world = []
         # Objects List
         list_label = QtWidgets.QLabel("Simulation Objects:")
         list_label.setStyleSheet("font-weight: bold; color: #424242; font-size: 13px;")
@@ -269,25 +368,25 @@ class SimulationPanel(QtWidgets.QWidget):
         self.main_window.sim_objects_list = self.objects_list
 
         # P1 Row
-        p1_lbl = QtWidgets.QLabel("P1")
-        p1_lbl.setStyleSheet("font-weight: bold; color: #1976d2; font-size: 13px;")
+        self.p1_label = QtWidgets.QLabel("P1")
+        self.p1_label.setStyleSheet("font-weight: bold; color: #1976d2; font-size: 13px;")
         self.pick_x = self.create_coord_sb("#1976d2")
         self.pick_y = self.create_coord_sb("#1976d2")
         self.pick_z = self.create_coord_sb("#1976d2")
         
-        points_grid.addWidget(p1_lbl, 0, 0)
+        points_grid.addWidget(self.p1_label, 0, 0)
         points_grid.addWidget(self.pick_x, 0, 1)
         points_grid.addWidget(self.pick_y, 0, 2)
         points_grid.addWidget(self.pick_z, 0, 3)
 
         # P2 Row
-        p2_lbl = QtWidgets.QLabel("P2")
-        p2_lbl.setStyleSheet("font-weight: bold; color: #388E3C; font-size: 13px;")
+        self.p2_label = QtWidgets.QLabel("P2")
+        self.p2_label.setStyleSheet("font-weight: bold; color: #388E3C; font-size: 13px;")
         self.place_x = self.create_coord_sb("#388E3C")
         self.place_y = self.create_coord_sb("#388E3C")
         self.place_z = self.create_coord_sb("#388E3C")
         
-        points_grid.addWidget(p2_lbl, 1, 0)
+        points_grid.addWidget(self.p2_label, 1, 0)
         points_grid.addWidget(self.place_x, 1, 1)
         points_grid.addWidget(self.place_y, 1, 2)
         points_grid.addWidget(self.place_z, 1, 3)
@@ -301,10 +400,31 @@ class SimulationPanel(QtWidgets.QWidget):
         for sb in [self.live_x, self.live_y, self.live_z]:
             sb.setReadOnly(True)
 
+        # Lock Live Point Button
+        self.lock_lp_btn = QtWidgets.QPushButton("🔓 Lock")
+        self.lock_lp_btn.setFixedWidth(50)
+        self.lock_lp_btn.setFixedHeight(32)
+        self.lock_lp_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.lock_lp_btn.setToolTip("Click to lock the current live point. Click again to unlock.")
+        self.lock_lp_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f5f5f5;
+                color: #D32F2F;
+                border: 1px solid #D32F2F;
+                border-radius: 4px;
+                font-size: 10px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #ffebee; }
+            QPushButton:pressed { background-color: #D32F2F; color: white; }
+        """)
+        self.lock_lp_btn.clicked.connect(self.toggle_lock_live_point)
+
         points_grid.addWidget(lp_lbl, 2, 0)
         points_grid.addWidget(self.live_x, 2, 1)
         points_grid.addWidget(self.live_y, 2, 2)
         points_grid.addWidget(self.live_z, 2, 3)
+        points_grid.addWidget(self.lock_lp_btn, 2, 4)
 
         # DIM Row (New: Industrial Dimensions)
         dim_lbl = QtWidgets.QLabel("DIM")
@@ -356,7 +476,8 @@ class SimulationPanel(QtWidgets.QWidget):
         self.stack.addWidget(self.objects_view)
         
         # Initial State
-        self.switch_view(0)
+        self.switch_view(2)
+        self._on_operation_changed()
 
     def create_coord_sb(self, color):
         sb = TypeOnlyDoubleSpinBox()
@@ -379,6 +500,197 @@ class SimulationPanel(QtWidgets.QWidget):
         """)
         sb.valueChanged.connect(self.main_window.save_sim_object_coords)
         return sb
+
+    def refresh_links(self):
+        """Refresh simulation objects whenever this workspace becomes visible."""
+        if hasattr(self.main_window, "refresh_sim_objects_list"):
+            self.main_window.refresh_sim_objects_list()
+
+    def import_simulation_object(self):
+        """Import a mesh and mark it as an object used by simulation tasks."""
+        self.main_window._simulation_object_import_active = True
+        try:
+            self.main_window.import_mesh()
+        finally:
+            self.main_window._simulation_object_import_active = False
+
+    def selected_operation(self):
+        return self.operation_combo.currentData() or "pick_place"
+
+    def _on_operation_changed(self, *_):
+        operation = self.selected_operation()
+        settings = {
+            "pick_place": (
+                "Run Pick & Place",
+                "P1 is the object's pick position and P2 is its place position.",
+                "P1",
+                "P2",
+            ),
+            "welding": (
+                "Run Welding",
+                "The welding TCP approaches P1, follows a straight weld path to P2, then retracts.",
+                "START",
+                "END",
+            ),
+            "painting": (
+                "Run Painting",
+                "The paint nozzle approaches P1, follows the surface path to P2, and applies the selected colour.",
+                "START",
+                "END",
+            ),
+        }
+        button_text, help_text, p1_text, p2_text = settings[operation]
+        self.pick_place_btn.setText(button_text)
+        self.operation_help.setText(help_text)
+        self.p1_label.setText(p1_text)
+        self.p2_label.setText(p2_text)
+        is_surface_operation = operation in ("welding", "painting")
+        self.process_points_label.setVisible(is_surface_operation)
+        self.process_points_sb.setVisible(is_surface_operation)
+        self.paint_color_label.setVisible(operation == "painting")
+        self.paint_color_combo.setVisible(operation == "painting")
+        self.update_btn.setVisible(operation == "pick_place")
+        self.capture_btn.setText(
+            "Set Object as P1" if operation == "pick_place" else "Set Path from Object Surface"
+        )
+        display_name = self.operation_combo.currentText()
+        self.operation_status.setText(f"Ready to configure {display_name}")
+
+    def _set_operation_running(self, running, message=None):
+        self.pick_place_btn.setEnabled(not running)
+        self.operation_combo.setEnabled(not running)
+        self.start_btn.setEnabled(running)
+        controlled_widgets = (
+            "import_btn",
+            "update_btn",
+            "objects_list",
+            "pick_x",
+            "pick_y",
+            "pick_z",
+            "place_x",
+            "place_y",
+            "place_z",
+            "process_points_sb",
+            "paint_color_combo",
+        )
+        if running:
+            self._operation_widget_enabled_state = {
+                name: getattr(self, name).isEnabled()
+                for name in controlled_widgets
+                if getattr(self, name, None) is not None
+            }
+        previous_states = getattr(self, "_operation_widget_enabled_state", {})
+        for widget_name in controlled_widgets:
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setEnabled(False if running else previous_states.get(widget_name, True))
+        if message:
+            color = "#e8f5e9" if running else "#eceff1"
+            text_color = "#2e7d32" if running else "#455a64"
+            self.operation_status.setStyleSheet(
+                f"background: {color}; color: {text_color}; border-radius: 5px; padding: 7px; font-size: 11px;"
+            )
+            self.operation_status.setText(message)
+
+    def run_selected_operation(self):
+        operation = self.selected_operation()
+        if operation == "pick_place":
+            self.run_pick_place_task()
+        else:
+            self.run_surface_operation(operation)
+
+    def stop_current_operation(self):
+        if not self.is_sim_active:
+            return
+        self.toggle_pick_place_sim(False)
+
+    @staticmethod
+    def _build_surface_path(start_cm, end_cm, point_count):
+        """Build an inclusive straight-line process path in centimetres."""
+        start = np.asarray(start_cm, dtype=float).reshape(3)
+        end = np.asarray(end_cm, dtype=float).reshape(3)
+        count = max(2, int(point_count))
+        return [start + (end - start) * alpha for alpha in np.linspace(0.0, 1.0, count)]
+
+    def _validate_operation_tool(self, operation):
+        if operation == "pick_place":
+            config = getattr(self.main_window, "gripper_tool_config", None)
+            label = "Gripper Tool"
+        elif operation == "welding":
+            config = getattr(self.main_window, "welding_tool_config", None)
+            label = "Welding Tool"
+        elif operation == "painting":
+            config = getattr(self.main_window, "paint_tool_config", None)
+            label = "Painting Tool"
+        else:
+            return False
+
+        tool_type = ""
+        if isinstance(config, dict):
+            tool_type = str(config.get("EndEffector", {}).get("ToolType", ""))
+        active_config = getattr(self.main_window, "end_effector_tool_config", None)
+        active_tool_type = ""
+        if isinstance(active_config, dict):
+            active_tool_type = str(active_config.get("EndEffector", {}).get("ToolType", ""))
+        if tool_type.lower() != label.lower() or active_tool_type.lower() != label.lower():
+            self.main_window.log(f"Select and save the {label} in End-Effector before running this operation.")
+            self.main_window.show_toast(f"Save the {label} first", "warning")
+            return False
+        return True
+
+    def run_surface_operation(self, operation):
+        """Start a welding or painting path over the selected simulation object."""
+        if self.is_sim_active:
+            self.main_window.show_toast("An object operation is already running", "warning")
+            return
+        if operation not in ("welding", "painting"):
+            return
+        if not self._validate_operation_tool(operation):
+            return
+
+        obj_name = self._selected_sim_object_name()
+        if not obj_name:
+            self.main_window.log("Select an object before starting the surface operation.")
+            self.main_window.show_toast("Select an object first", "warning")
+            return
+
+        tcp_link = self._get_tcp_link()
+        if tcp_link is None:
+            self.main_window.log("No TCP (Live Point) link is available for the selected tool.")
+            self.main_window.show_toast("No TCP found", "warning")
+            return
+
+        start_cm = [self.pick_x.value(), self.pick_y.value(), self.pick_z.value()]
+        end_cm = [self.place_x.value(), self.place_y.value(), self.place_z.value()]
+        if np.linalg.norm(np.asarray(end_cm) - np.asarray(start_cm)) < 1e-6:
+            self.main_window.log("The process start and end points must be different.")
+            self.main_window.show_toast("Set different START and END points", "warning")
+            return
+
+        self.current_task_object = obj_name
+        self.main_window.current_task_object = obj_name
+        self.active_operation = operation
+        self._process_path_cm = self._build_surface_path(start_cm, end_cm, self.process_points_sb.value())
+        self._process_path_index = 0
+        self._process_trace_points_world = []
+        self._initial_joint_state = {
+            name: joint.current_value for name, joint in self.main_window.robot.joints.items()
+        }
+        self.gripped_object = None
+        self.grip_offset = None
+        self.target_joint_values = {}
+        self.is_sim_active = True
+        self.sim_state = "SOLVE_PROCESS_APPROACH"
+        operation_name = "Welding" if operation == "welding" else "Painting"
+        self._set_operation_running(True, f"{operation_name} is running: approaching START")
+        self.main_window.log("─" * 50)
+        self.main_window.log(f"STARTING {operation_name.upper()} OPERATION")
+        self.main_window.log(f"   Object      : {obj_name}")
+        self.main_window.log(f"   Path points : {len(self._process_path_cm)}")
+        self.main_window.log(f"   TCP Link    : {tcp_link.name}")
+        self.main_window.log("─" * 50)
+        self.sim_timer.start(50)
+        self.main_window.show_toast(f"{operation_name} operation started", "info")
 
     def update_object_position(self):
         """Moves the selected simulation object to P1 coordinates and compiles the path for Pick and Place."""
@@ -500,48 +812,56 @@ class SimulationPanel(QtWidgets.QWidget):
             self.refresh_object_info(name)
 
     def capture_object_to_p1(self):
-        """Captures the selected object's BOTTOM-CENTER world position into P1 spinboxes.
-        
-        P1 represents the bottom-center of the object (the coordinate the robot moves to
-        before gripping). This accounts for the mesh's local min-Z offset so the pick
-        coordinate always refers to the true base of the object in world space.
-        """
-        current_item = self.objects_list.currentItem()
-        if not current_item:
+        """Capture a grip point or a top-surface process path from the object."""
+        name = self._selected_sim_object_name()
+        if not name:
             return
-            
-        name = current_item.text()
+
         if name not in self.main_window.robot.links:
             return
 
         link = self.main_window.robot.links[name]
         ratio = self.main_window.canvas.grid_units_per_cm
 
-        # Compute world-space bottom-center
-        # The mesh origin may be offset from the actual bottom, so we convert the
-        # local bottom-center of the mesh bounding box to world space.
+        is_surface_operation = self.selected_operation() in ("welding", "painting")
         if link.mesh:
             b = link.mesh.bounds
-            local_bottom_center = np.array([
-                (b[0][0] + b[1][0]) / 2.0,  # center X
-                (b[0][1] + b[1][1]) / 2.0,  # center Y
-                b[0][2]                       # bottom Z (local min)
-            ])
-            world_bottom = (link.t_world @ np.append(local_bottom_center, 1.0))[:3]
+            center_y = (b[0][1] + b[1][1]) / 2.0
+            center_x = (b[0][0] + b[1][0]) / 2.0
+            if is_surface_operation:
+                local_start = np.array([b[0][0], center_y, b[1][2]])
+                local_end = np.array([b[1][0], center_y, b[1][2]])
+                world_start = (link.t_world @ np.append(local_start, 1.0))[:3]
+                world_end = (link.t_world @ np.append(local_end, 1.0))[:3]
+            else:
+                local_start = np.array([center_x, center_y, b[0][2]])
+                world_start = (link.t_world @ np.append(local_start, 1.0))[:3]
+                world_end = None
         else:
-            # Fall back to transform origin if no mesh
-            world_bottom = link.t_world[:3, 3]
+            world_start = link.t_world[:3, 3]
+            world_end = None
 
-        pos_cm = world_bottom / ratio
+        pos_cm = world_start / ratio
 
         self.pick_x.setValue(pos_cm[0])
         self.pick_y.setValue(pos_cm[1])
         self.pick_z.setValue(pos_cm[2])
 
-        self.main_window.log(
-            f"🎯 P1 set to bottom-center of '{name}': "
-            f"({pos_cm[0]:.1f}, {pos_cm[1]:.1f}, {pos_cm[2]:.1f}) cm"
-        )
+        if world_end is not None:
+            end_cm = world_end / ratio
+            self.place_x.setValue(end_cm[0])
+            self.place_y.setValue(end_cm[1])
+            self.place_z.setValue(end_cm[2])
+            self.main_window.log(
+                f"Surface path set for '{name}': START ({pos_cm[0]:.1f}, {pos_cm[1]:.1f}, {pos_cm[2]:.1f}) cm "
+                f"to END ({end_cm[0]:.1f}, {end_cm[1]:.1f}, {end_cm[2]:.1f}) cm"
+            )
+        else:
+            self.main_window.log(
+                f"P1 set to bottom-center of '{name}': "
+                f"({pos_cm[0]:.1f}, {pos_cm[1]:.1f}, {pos_cm[2]:.1f}) cm"
+            )
+
         self.main_window.save_sim_object_coords()
 
     def refresh_object_info(self, name):
@@ -569,26 +889,97 @@ class SimulationPanel(QtWidgets.QWidget):
         pos = link.t_world[:3, 3] / ratio
         self.pos_label.setText(f"Current Pos: ({pos[0]:.1f}, {pos[1]:.1f}, {pos[2]:.1f}) cm")
 
+    def _selected_sim_object_name(self):
+        """Return the selected imported object name, falling back to task state."""
+        if hasattr(self, "objects_list"):
+            current_item = self.objects_list.currentItem()
+            if current_item is not None:
+                name = current_item.text()
+                if name in self.main_window.robot.links:
+                    return name
+
+        task_name = getattr(self, "current_task_object", None)
+        if isinstance(task_name, str) and task_name in self.main_window.robot.links:
+            return task_name
+
+        return None
+
+    def run_pick_place_task(self):
+        """Start the current pick-and-place sequence after validating inputs."""
+        if self.is_sim_active:
+            self.main_window.log("⚠️ Pick-and-place is already running.")
+            self.main_window.show_toast("Pick-and-place is already running", "warning")
+            return
+
+        if not self._validate_operation_tool("pick_place"):
+            return
+
+        obj_name = self._selected_sim_object_name()
+        if not obj_name:
+            self.main_window.log("⚠️ No simulation object selected. Please select an object first.")
+            self.main_window.show_toast("Select an object first", "warning")
+            return
+
+        if obj_name not in self.main_window.robot.links:
+            self.main_window.log("⚠️ Selected object not found in the robot model.")
+            self.main_window.show_toast("Selected object is not in the robot model", "error")
+            return
+
+        items = self.objects_list.findItems(obj_name, QtCore.Qt.MatchExactly)
+        if items:
+            self.objects_list.setCurrentItem(items[0])
+        self.current_task_object = obj_name
+        self.main_window.current_task_object = obj_name
+
+        obj_link = self.main_window.robot.links[obj_name]
+        if self._known_primitive_dimensions_world(obj_link) is not None:
+            # Panel-created cubes/cylinders carry authoritative dimensions and
+            # transforms, so always refresh P1 from the object's current base center.
+            self.refresh_object_info(obj_name)
+            self.capture_object_to_p1()
+
+        if hasattr(self.main_window, "ensure_saved_gripper_tcp"):
+            repaired_tcp = self.main_window.ensure_saved_gripper_tcp()
+            if repaired_tcp is not None:
+                self.main_window.log(
+                    f"🎯 Pick TCP synchronized to the midpoint of the saved gripper jaws on '{repaired_tcp.name}'."
+                )
+
+        tcp_link = self._get_tcp_link()
+        if not tcp_link:
+            self.main_window.log("⚠️ No TCP (Live Point) link found on robot.")
+            self.main_window.show_toast("No TCP found", "warning")
+            return
+
+        if self.obj_height.value() == 0.0 and self.obj_width.value() == 0.0:
+            self.refresh_object_info(obj_name)
+
+        self.main_window.log("🤖 Launching pick-and-place task...")
+        self.main_window.log(f"   Object : {obj_name}")
+        self.main_window.log(
+            f"   P1     : ({self.pick_x.value():.1f}, {self.pick_y.value():.1f}, {self.pick_z.value():.1f}) cm"
+        )
+        self.main_window.log(
+            f"   P2     : ({self.place_x.value():.1f}, {self.place_y.value():.1f}, {self.place_z.value():.1f}) cm"
+        )
+
+        self.toggle_pick_place_sim(True)
+        if self.is_sim_active:
+            self.main_window.show_toast("Pick-and-place task started", "info")
+
     def toggle_pick_place_sim(self, checked):
         """Enable automated pick-and-place monitoring with sequential motion."""
         if checked:
             # === PRE-FLIGHT VALIDATION ===
             # 1. Verify an object is selected
-            current_item = self.objects_list.currentItem()
-            if not current_item:
+            obj_name = self._selected_sim_object_name()
+            if not obj_name:
                 self.main_window.log("⚠️ No simulation object selected. Please select an object from the list first.")
                 self.main_window.show_toast("Select an object first!", "warning")
-                self.start_btn.blockSignals(True)
-                self.start_btn.setChecked(False)
-                self.start_btn.blockSignals(False)
                 return
 
-            obj_name = current_item.text()
             if obj_name not in self.main_window.robot.links:
                 self.main_window.log("⚠️ Selected object not found in robot model.")
-                self.start_btn.blockSignals(True)
-                self.start_btn.setChecked(False)
-                self.start_btn.blockSignals(False)
                 return
 
             # 2. Refresh dimensions from mesh if DIM fields are still zero
@@ -601,13 +992,21 @@ class SimulationPanel(QtWidgets.QWidget):
             if not tcp_link:
                 self.main_window.log("⚠️ No TCP (Live Point) link found on robot. Cannot start simulation.")
                 self.main_window.show_toast("No TCP found!", "warning")
-                self.start_btn.blockSignals(True)
-                self.start_btn.setChecked(False)
-                self.start_btn.blockSignals(False)
                 return
+
+            obj_link = self.main_window.robot.links[obj_name]
+            self._pick_place_original_object_rotation = np.asarray(
+                obj_link.t_world[:3, :3],
+                dtype=float,
+            ).copy()
+            self._pick_place_tcp_orientation = self._build_pick_place_alignment_orientation(
+                tcp_link,
+                obj_link,
+            )
 
             # === START SEQUENCE ===
             self.is_sim_active = True
+            self.active_operation = "pick_place"
             self.main_window.log("─" * 50)
             self.main_window.log("🚀 STARTING PICK-AND-PLACE SEQUENCE")
             ratio = self.main_window.canvas.grid_units_per_cm
@@ -618,8 +1017,10 @@ class SimulationPanel(QtWidgets.QWidget):
             self.main_window.log(f"   TCP Link   : {tcp_link.name}")
             self.main_window.log("─" * 50)
 
-            self.start_btn.setText("🛑 Stop Simulation")
-            self.start_btn.setStyleSheet("background-color: #f44336; color: white; border-radius: 8px; font-weight: bold; font-size: 14px;")
+            self._set_operation_running(True, "Pick & Place is running: opening the gripper")
+            self.main_window.log(
+                "   Flow      : align gripper -> approach with clearance -> cover object -> close jaws -> keep pose locked -> place with IK/FK"
+            )
 
             # === Snapshot initial joint state so we can return later ===
             self._initial_joint_state = {
@@ -632,24 +1033,33 @@ class SimulationPanel(QtWidgets.QWidget):
             self.main_window.log("📍 Initializing motion sequence from Robot Base...")
             self.gripped_object = None
             self.grip_offset = None
+            self.grip_translation_offset = None
             self.target_joint_values = {}
             self._target_gripper_angles = {}  # for smooth animation
+            self._gripper_contact_joint_names = set()
             self.active_joint_index = 0
 
             self.sim_timer.start(50)  # Ticking every 50 ms
         else:
-            self.main_window.log("🛑 Simulation Stopped.")
-            self.start_btn.setText("🚀 Start Simulation")
-            self.start_btn.setStyleSheet("background-color: #fdd835; color: #212121; border-radius: 8px; font-weight: bold; font-size: 14px;")
+            operation_name = (self.active_operation or "object").replace("_", " ").title()
+            self.main_window.log(f"{operation_name} operation stopped.")
             self.sim_timer.stop()
             self.is_sim_active = False
             self.sim_state = "IDLE"
+            self.active_operation = None
+            self._set_operation_running(False, "Operation stopped. Ready to run again.")
 
             # Reset state
             self.gripped_object = None
             self.grip_offset = None
-            self.main_window.canvas.clear_highlights()
-            self.main_window.canvas.plotter.render()
+            self.grip_translation_offset = None
+            self._pick_place_tcp_orientation = None
+            self._pick_place_original_object_rotation = None
+            self.grip_original_rotation = None
+            if hasattr(self.main_window, "canvas") and hasattr(self.main_window.canvas, "clear_highlights"):
+                self.main_window.canvas.clear_highlights()
+            if hasattr(self.main_window, "canvas") and hasattr(self.main_window.canvas, "plotter") and hasattr(self.main_window.canvas.plotter, "render"):
+                self.main_window.canvas.plotter.render()
             
     def _on_sim_tick(self):
         if not self.is_sim_active:
@@ -658,6 +1068,14 @@ class SimulationPanel(QtWidgets.QWidget):
         # 1. Identify TCP link
         tcp_link = self._get_tcp_link()
         if not tcp_link:
+            return
+
+        if self.active_operation in ("welding", "painting"):
+            self._on_surface_operation_tick(tcp_link)
+            self._sync_all_sliders()
+            self.main_window.canvas.update_transforms(self.main_window.robot, render=False)
+            self.main_window.update_live_ui(render=False)
+            self.main_window.canvas.plotter.render()
             return
 
         # 2. STATE MACHINE (Industrial Sequence)
@@ -680,6 +1098,8 @@ class SimulationPanel(QtWidgets.QWidget):
         #  DONE              → sequence complete
         # ──────────────────────────────────────────────────────────────────
 
+        # Pick-and-place sequence:
+        # align -> approach -> cover object -> close jaws -> carry with locked pose -> place
         if self.sim_state == "OPEN_GRIPPER":
             if not self._target_gripper_angles:
                 grip_width, _, _ = self._get_object_grip_width()
@@ -695,18 +1115,48 @@ class SimulationPanel(QtWidgets.QWidget):
                     # If still empty (no gripper joints), skip immediately
                     if not self._target_gripper_angles:
                         self.main_window.log("ℹ️ No gripper joints found — skipping OPEN_GRIPPER.")
-                        self.sim_state = "SOLVE_APPROACH_P1"
+                        self.sim_state = (
+                            "SOLVE_ALIGN_TOOL"
+                            if self._pick_place_tcp_orientation is not None
+                            else "SOLVE_APPROACH_P1"
+                        )
                         return
                     self.main_window.log("👐 Opening gripper fully before approach...")
 
-            done = self._move_gripper_smoothly()
+            done = self._move_gripper_smoothly(tcp_link)
             if done:
                 self.main_window.log("✅ Gripper open. Commencing movement from Base reference to P1...")
                 self._target_gripper_angles = {}
-                self.sim_state = "SOLVE_APPROACH_P1"
+                self.sim_state = (
+                    "SOLVE_ALIGN_TOOL"
+                    if self._pick_place_tcp_orientation is not None
+                    else "SOLVE_APPROACH_P1"
+                )
+
+        elif self.sim_state == "SOLVE_ALIGN_TOOL":
+            self._solve_initial_gripper_alignment(tcp_link)
+
+        elif self.sim_state == "MOVE_ALIGN_TOOL":
+            if self._handle_sequential_motion():
+                self.main_window.log(
+                    "Selected gripper face is aligned with the object's base at the safe point. "
+                    "Descending to grip the object..."
+                )
+                self.main_window.log("Alignment is locked for the rest of the pick-and-place sequence.")
+                self._set_operation_running(
+                    True,
+                    "Pick & Place is running: tool aligned, descending to grip",
+                )
+                self.sim_state = "SOLVE_PICK_P1"
 
         elif self.sim_state == "SOLVE_APPROACH_P1":
-            self._handle_state_solve("P1", tcp_link, next_state="MOVE_APPROACH_P1", z_offset_cm=5.0)
+            self._handle_state_solve(
+                "P1",
+                tcp_link,
+                next_state="MOVE_APPROACH_P1",
+                z_offset_cm=5.0,
+                preserve_pick_place_orientation=self._pick_place_tcp_orientation is not None,
+            )
 
         elif self.sim_state == "MOVE_APPROACH_P1":
             if self._handle_sequential_motion():
@@ -714,25 +1164,45 @@ class SimulationPanel(QtWidgets.QWidget):
                 self.sim_state = "SOLVE_PICK_P1"
 
         elif self.sim_state == "SOLVE_PICK_P1":
-            self._handle_state_solve("P1", tcp_link, next_state="MOVE_PICK_P1", z_offset_cm=0.0)
+            self._handle_state_solve(
+                "P1",
+                tcp_link,
+                next_state="MOVE_PICK_P1",
+                z_offset_cm=0.0,
+                preserve_pick_place_orientation=self._pick_place_tcp_orientation is not None,
+            )
 
         elif self.sim_state == "MOVE_PICK_P1":
             if self._handle_sequential_motion():
                 self.main_window.log("📍 Reached P1. Closing gripper to grip object...")
+                self.main_window.log("Rotating all gripper joints together to catch the object.")
                 self.sim_state = "GRIP"
 
         elif self.sim_state == "GRIP":
             if not self._target_gripper_angles:
                 self._prepare_grip_targets(tcp_link)
             
-            if self._move_gripper_smoothly():
-                self._finalize_grip(tcp_link)
-                self.main_window.log("🧲 Object gripped. Lifting object from P1...")
+            if self._move_gripper_smoothly(tcp_link):
                 self._target_gripper_angles = {}
-                self.sim_state = "SOLVE_LIFT_P1"
+                if self._finalize_grip(tcp_link):
+                    self.main_window.log("🧲 Object gripped between the configured jaws. Lifting from P1...")
+                    self.main_window.log("The gripper-object alignment will remain unchanged during transport.")
+                    self.sim_state = "SOLVE_LIFT_P1"
+                else:
+                    self.main_window.log("Pick aborted: both configured jaws did not contact the object.")
+                    self.main_window.show_toast("Grip failed: object is not between the jaws", "warning")
+                    self.target_joint_values = dict(self._initial_joint_state)
+                    self.joint_chain = self.main_window.robot.get_kinematic_chain(tcp_link)
+                    self.sim_state = "AUTO_RETURN"
 
         elif self.sim_state == "SOLVE_LIFT_P1":
-            self._handle_state_solve("P1", tcp_link, next_state="MOVE_LIFT_P1", z_offset_cm=5.0)
+            self._handle_state_solve(
+                "P1",
+                tcp_link,
+                next_state="MOVE_LIFT_P1",
+                z_offset_cm=5.0,
+                preserve_pick_place_orientation=self._pick_place_tcp_orientation is not None,
+            )
 
         elif self.sim_state == "MOVE_LIFT_P1":
             self._carry_gripped_object(tcp_link)
@@ -741,35 +1211,55 @@ class SimulationPanel(QtWidgets.QWidget):
                 self.sim_state = "SOLVE_APPROACH_P2"
 
         elif self.sim_state == "SOLVE_APPROACH_P2":
-            self._handle_state_solve("P2", tcp_link, next_state="MOVE_APPROACH_P2", z_offset_cm=5.0)
+            self._handle_state_solve(
+                "P2",
+                tcp_link,
+                next_state="MOVE_APPROACH_P2",
+                z_offset_cm=5.0,
+                preserve_pick_place_orientation=self._pick_place_tcp_orientation is not None,
+            )
 
         elif self.sim_state == "MOVE_APPROACH_P2":
             self._carry_gripped_object(tcp_link)
             if self._handle_sequential_motion():
                 self.main_window.log("📍 Reached P2 approach point. Descending to place...")
+                self.main_window.log("Descending with the same gripper orientation for IK/FK-consistent placement.")
                 self.sim_state = "SOLVE_PLACE_P2"
 
         elif self.sim_state == "SOLVE_PLACE_P2":
-            self._handle_state_solve("P2", tcp_link, next_state="MOVE_PLACE_P2", z_offset_cm=0.0)
+            self._handle_state_solve(
+                "P2",
+                tcp_link,
+                next_state="MOVE_PLACE_P2",
+                z_offset_cm=0.0,
+                preserve_pick_place_orientation=self._pick_place_tcp_orientation is not None,
+            )
 
         elif self.sim_state == "MOVE_PLACE_P2":
             self._carry_gripped_object(tcp_link)
             if self._handle_sequential_motion():
                 self.main_window.log("📍 Reached P2. Opening gripper to release object...")
+                self.main_window.log("Using the solved FK pose to keep the final placement aligned.")
                 self.sim_state = "RELEASE"
 
         elif self.sim_state == "RELEASE":
             if not self._target_gripper_angles:
                 self._prepare_release_targets()
             
-            if self._move_gripper_smoothly():
+            if self._move_gripper_smoothly(tcp_link):
                 self._finalize_release()
                 self.main_window.log("📦 Object released. Retracting from P2...")
                 self._target_gripper_angles = {}
                 self.sim_state = "SOLVE_RETRACT_P2"
 
         elif self.sim_state == "SOLVE_RETRACT_P2":
-            self._handle_state_solve("P2", tcp_link, next_state="MOVE_RETRACT_P2", z_offset_cm=5.0)
+            self._handle_state_solve(
+                "P2",
+                tcp_link,
+                next_state="MOVE_RETRACT_P2",
+                z_offset_cm=5.0,
+                preserve_pick_place_orientation=self._pick_place_tcp_orientation is not None,
+            )
 
         elif self.sim_state == "MOVE_RETRACT_P2":
             if self._handle_sequential_motion():
@@ -800,16 +1290,157 @@ class SimulationPanel(QtWidgets.QWidget):
         self.main_window.update_live_ui(render=False)
         self.main_window.canvas.plotter.render()
 
+    def _on_surface_operation_tick(self, tcp_link):
+        """Advance one timer step of a welding or painting path."""
+        operation_name = "Welding" if self.active_operation == "welding" else "Painting"
+
+        if self.sim_state == "SOLVE_PROCESS_APPROACH":
+            approach = np.array(self._process_path_cm[0], dtype=float)
+            approach[2] += 5.0
+            self._handle_state_solve(
+                "START approach",
+                tcp_link,
+                next_state="MOVE_PROCESS_APPROACH",
+                target_cm_override=approach,
+                align_to_object=False,
+            )
+
+        elif self.sim_state == "MOVE_PROCESS_APPROACH":
+            if self._handle_sequential_motion():
+                self.operation_status.setText(f"{operation_name} is running: processing path point 1")
+                self.sim_state = "SOLVE_PROCESS_POINT"
+
+        elif self.sim_state == "SOLVE_PROCESS_POINT":
+            point_number = self._process_path_index + 1
+            target = self._process_path_cm[self._process_path_index]
+            self._handle_state_solve(
+                f"PATH {point_number}",
+                tcp_link,
+                next_state="MOVE_PROCESS_POINT",
+                target_cm_override=target,
+                align_to_object=False,
+            )
+
+        elif self.sim_state == "MOVE_PROCESS_POINT":
+            if self._handle_sequential_motion():
+                self._append_process_trace_point(self._process_path_cm[self._process_path_index])
+                self._process_path_index += 1
+                if self._process_path_index < len(self._process_path_cm):
+                    self.operation_status.setText(
+                        f"{operation_name} is running: processing path point "
+                        f"{self._process_path_index + 1} of {len(self._process_path_cm)}"
+                    )
+                    self.sim_state = "SOLVE_PROCESS_POINT"
+                else:
+                    self.operation_status.setText(f"{operation_name} path complete: retracting tool")
+                    self.sim_state = "SOLVE_PROCESS_RETRACT"
+
+        elif self.sim_state == "SOLVE_PROCESS_RETRACT":
+            retract = np.array(self._process_path_cm[-1], dtype=float)
+            retract[2] += 5.0
+            self._handle_state_solve(
+                "END retract",
+                tcp_link,
+                next_state="MOVE_PROCESS_RETRACT",
+                target_cm_override=retract,
+                align_to_object=False,
+            )
+
+        elif self.sim_state == "MOVE_PROCESS_RETRACT":
+            if self._handle_sequential_motion():
+                self.target_joint_values = dict(self._initial_joint_state)
+                self.joint_chain = self.main_window.robot.get_kinematic_chain(tcp_link)
+                self.operation_status.setText(f"{operation_name} complete: returning robot to start")
+                self.sim_state = "AUTO_RETURN"
+
+        elif self.sim_state == "AUTO_RETURN":
+            if self._handle_sequential_motion():
+                self.sim_state = "DONE"
+
+        elif self.sim_state == "DONE":
+            self.sim_timer.stop()
+            self._complete_surface_operation()
+            self._finish_return()
+            self.sim_state = "IDLE"
+
+    def _append_process_trace_point(self, point_cm):
+        ratio = self.main_window.canvas.grid_units_per_cm
+        point_world = np.asarray(point_cm, dtype=float) * ratio
+        self._process_trace_points_world.append(point_world)
+        if len(self._process_trace_points_world) < 2:
+            return
+
+        try:
+            import pyvista as pv
+
+            start = self._process_trace_points_world[-2]
+            end = self._process_trace_points_world[-1]
+            color = "#ff6f00" if self.active_operation == "welding" else self.paint_color_combo.currentData()
+            trace_name = f"object_operation_trace_{self.active_operation}_{len(self._process_trace_points_world)}"
+            self.main_window.canvas.plotter.add_mesh(
+                pv.Line(start, end),
+                color=color,
+                line_width=5 if self.active_operation == "welding" else 8,
+                name=trace_name,
+            )
+        except Exception as exc:
+            self.main_window.log(f"Operation trace could not be drawn: {exc}")
+
+    def _complete_surface_operation(self):
+        operation = self.active_operation
+        obj_name = self._selected_sim_object_name()
+        link = self.main_window.robot.links.get(obj_name) if obj_name else None
+        result = {
+            "operation": operation,
+            "start_cm": np.asarray(self._process_path_cm[0]).tolist(),
+            "end_cm": np.asarray(self._process_path_cm[-1]).tolist(),
+            "path_points": len(self._process_path_cm),
+        }
+        if link is not None:
+            history = list(getattr(link, "simulation_operations", []))
+            history.append(result)
+            link.simulation_operations = history
+
+        if operation == "painting" and link is not None:
+            paint_color = self.paint_color_combo.currentData()
+            link.color = paint_color
+            if hasattr(self.main_window.canvas, "set_actor_color"):
+                self.main_window.canvas.set_actor_color(link.name, paint_color)
+            result["colour"] = paint_color
+            self.main_window.log(f"Painting complete: '{link.name}' changed to {paint_color}.")
+        else:
+            self.main_window.log(f"Welding complete on '{obj_name}'.")
+
+        operation_name = "Painting" if operation == "painting" else "Welding"
+        self.main_window.show_toast(f"{operation_name} operation complete", "success")
+
+    def _known_primitive_dimensions_world(self, obj_link):
+        """Return known cube/cylinder dimensions in scene units, if available."""
+        metadata = getattr(obj_link, "import_metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        object_type = str(metadata.get("object_type", "")).strip().lower()
+        if object_type not in ("cube", "cylinder"):
+            return None
+        raw_size = metadata.get("final_size") or metadata.get("raw_size")
+        try:
+            dimensions_mm = np.asarray(raw_size, dtype=float).reshape(3)
+        except Exception:
+            return None
+        if not np.all(np.isfinite(dimensions_mm)) or np.any(dimensions_mm <= 0):
+            return None
+        units_per_mm = self.main_window.canvas.grid_units_per_cm / 10.0
+        return object_type, dimensions_mm * units_per_mm
+
     def _get_object_grip_width(self):
         """
         Measures the object's thickness along the gripper's opening axis
         and the world-space height of the selected sim object.
         Returns (grip_size_world, z_offset_world, obj_link)
         """
-        item = self.objects_list.currentItem()
-        if not item:
+        obj_name = self._selected_sim_object_name()
+        if not obj_name:
             return 0.0, 0.0, None
-        obj_name = item.text()
         if obj_name not in self.main_window.robot.links:
             return 0.0, 0.0, None
 
@@ -818,6 +1449,17 @@ class SimulationPanel(QtWidgets.QWidget):
             return 0.0, 0.0, obj_link
 
         ratio = self.main_window.canvas.grid_units_per_cm
+
+        known_geometry = self._known_primitive_dimensions_world(obj_link)
+        if known_geometry is not None:
+            object_type, dimensions_world = known_geometry
+            width, depth, height = dimensions_world
+            grip_width = width if object_type == "cylinder" else max(width, depth)
+            self.main_window.log(
+                f"📐 Known {object_type}: using stored dimensions "
+                f"({width/ratio:.1f}x{depth/ratio:.1f}x{height/ratio:.1f} cm)."
+            )
+            return float(grip_width), float(height / 2.0), obj_link
         
         # --- NEW: Prioritize Manual User Inputs (Industrial Standard) ---
         m_w = self.obj_width.value() * ratio
@@ -901,6 +1543,57 @@ class SimulationPanel(QtWidgets.QWidget):
 
         return grip_width, z_offset, obj_link
 
+    def _imported_object_base_rotation(self, obj_link):
+        """Return the saved import rotation used as the object's stable base side."""
+        metadata = getattr(obj_link, "import_metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        rotation = metadata.get("import_world_rotation")
+        if rotation is None:
+            return None
+        try:
+            rotation = np.asarray(rotation, dtype=float).reshape(3, 3)
+        except Exception:
+            return None
+        if not np.all(np.isfinite(rotation)):
+            return None
+        return rotation
+
+    def _ground_aligned_object_rotation(self, obj_link):
+        """Return an object rotation whose base face stays parallel to the ground."""
+        base_rotation = self._imported_object_base_rotation(obj_link)
+        if base_rotation is None:
+            base_rotation = np.asarray(getattr(obj_link, "t_world", np.eye(4)), dtype=float)[:3, :3]
+
+        base_rotation = np.asarray(base_rotation, dtype=float).reshape(3, 3)
+        if not np.all(np.isfinite(base_rotation)):
+            return np.eye(3)
+
+        # Preserve the object's heading as much as possible while forcing the
+        # base face normal to point downward.
+        heading = base_rotation @ np.array([1.0, 0.0, 0.0], dtype=float)
+        heading[2] = 0.0
+        heading_norm = float(np.linalg.norm(heading))
+        if heading_norm <= 1e-9:
+            heading = base_rotation @ np.array([0.0, 1.0, 0.0], dtype=float)
+            heading[2] = 0.0
+            heading_norm = float(np.linalg.norm(heading))
+        if heading_norm <= 1e-9:
+            heading = np.array([1.0, 0.0, 0.0], dtype=float)
+            heading_norm = 1.0
+        x_axis = heading / heading_norm
+        z_axis = np.array([0.0, 0.0, 1.0], dtype=float)
+        y_axis = np.cross(z_axis, x_axis)
+        y_norm = float(np.linalg.norm(y_axis))
+        if y_norm <= 1e-9:
+            y_axis = np.array([0.0, 1.0, 0.0], dtype=float)
+            y_norm = 1.0
+        y_axis /= y_norm
+        x_axis = np.cross(y_axis, z_axis)
+        x_axis /= max(float(np.linalg.norm(x_axis)), 1e-9)
+
+        return np.column_stack((x_axis, y_axis, z_axis))
+
 
     def _presise_gripper_for_approach(self):
         """Opens gripper fully before commencing movement to P1."""
@@ -943,34 +1636,98 @@ class SimulationPanel(QtWidgets.QWidget):
                 for s_id, ratio in self.main_window.robot.joint_relations.get(j_name, []):
                     self.main_window.log(f"      ∟ Slave Folding Joint '{s_id}' target: {angle * ratio:.2f}°")
 
+    def _log_joint_angles(self, prefix="Joint angles"):
+        """Print all joint angles to the terminal in one compact line."""
+        robot = getattr(self.main_window, "robot", None)
+        if robot is None or not getattr(robot, "joints", None):
+            return
+        parts = []
+        for name, joint in robot.joints.items():
+            parts.append(f"{name}={float(joint.current_value):.2f}°")
+        self.main_window.log(f"{prefix}: " + " | ".join(parts))
+
+    def _sync_object_to_jaw_contact(self, tcp_link):
+        """Visually keep the workpiece centered between the touching jaw faces."""
+        obj_name = getattr(self, "current_task_object", None)
+        if not isinstance(obj_name, str) or obj_name not in self.main_window.robot.links:
+            return
+
+        obj_link = self.main_window.robot.links[obj_name]
+        if not obj_link.mesh:
+            return
+
+        contact_names = sorted(
+            self._gripper_contact_joint_names
+            or self._contacting_configured_gripper_joints()
+            or []
+        )
+        if len(contact_names) < 2:
+            return
+
+        contact_points = []
+        object_center = np.asarray(obj_link.t_world[:3, 3], dtype=float)
+        for joint_name in contact_names:
+            contact_point = self._jaw_contact_point_world(joint_name, object_center)
+            if contact_point is not None:
+                contact_points.append(np.asarray(contact_point, dtype=float))
+
+        if len(contact_points) < 2:
+            return
+
+        midpoint = np.mean(np.asarray(contact_points, dtype=float), axis=0)
+        R_obj = self._ground_aligned_object_rotation(obj_link)
+
+        local_center = np.asarray(obj_link.mesh.centroid, dtype=float).reshape(3)
+        snapped_pose = np.eye(4)
+        snapped_pose[:3, :3] = R_obj
+        snapped_pose[:3, 3] = midpoint - R_obj @ local_center
+        obj_link.t_offset = snapped_pose
+        self.main_window.robot.update_kinematics()
+        self.main_window.canvas.update_transforms(self.main_window.robot)
+        self.main_window.simulation_tab.refresh_object_info(obj_name)
+
 
     def _finalize_grip(self, tcp_link):
         """Actually attaches the object to the robot after gripper finished closing."""
         _, _, obj_link = self._get_object_grip_width()
-        if not obj_link or not obj_link.mesh: return
+        if not obj_link or not obj_link.mesh:
+            return False
+
+        contact_names = self._contacting_configured_gripper_joints()
+        contact_names.update(getattr(self, "_gripper_contact_joint_names", set()))
+        configured_names = set(self.main_window._configured_gripper_joint_names())
+        valid_contacts = contact_names.intersection(configured_names)
+        if len(valid_contacts) < 2:
+            self.main_window.log(
+                f"Grip validation failed: {len(valid_contacts)} of {len(configured_names)} configured jaw joints touch the object."
+            )
+            return False
+
+        if not self._object_is_between_jaws(obj_link, valid_contacts):
+            self.main_window.log("Grip validation failed: jaw contacts are not on opposing sides of the object.")
+            return False
 
         # 1. Compute the exact TCP (centroid of fingers) at this moment
         world_tcp, local_tcp, geo_data = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
-        
-        # 2. Perfect Centering: Use mesh centroid instead of axis-aligned bounds midpoint
-        local_center = obj_link.mesh.centroid
-        
-        # 3. Create a 'Perfect Hold' pose for the object
-        # We preserve the object's current rotation (R_obj)
+
+        # 2. Lock the object in its current snapped pose so the jaw faces keep
+        # touching it visually while the grip closes.
         t_obj_perfect = obj_link.t_world.copy()
-        R_obj = t_obj_perfect[:3, :3]
-        
-        # Set world translation so centroid aligns exactly with TCP
-        t_obj_perfect[:3, 3] = world_tcp - R_obj @ local_center
-        
-        # Store relative offset from Hand (TCP Link) to the perfect object pose
+        t_obj_perfect[:3, :3] = self._ground_aligned_object_rotation(obj_link)
+
+        # Store relative offset from Hand (TCP Link) to the snapped object pose
         inv_hand = np.linalg.inv(tcp_link.t_world)
         self.grip_offset = inv_hand @ t_obj_perfect
         self.gripped_object = obj_link.name
         self.grip_original_rotation = R_obj.copy()
+        tcp_world = np.asarray(tcp_link.t_world, dtype=float)
+        self.grip_translation_offset = t_obj_perfect[:3, 3] - tcp_world[:3, 3]
         
         # Apply immediately to the link offset
-        obj_link.t_offset = tcp_link.t_world @ self.grip_offset
+        carried_pose = np.eye(4)
+        carried_pose[:3, :3] = self._ground_aligned_object_rotation(obj_link)
+        carried_pose[:3, 3] = tcp_world[:3, 3] + self.grip_translation_offset
+        obj_link.t_offset = carried_pose
         self.main_window.robot.update_kinematics()
         
         # --- PERFECT GRIP FEEDBACK ---
@@ -984,6 +1741,7 @@ class SimulationPanel(QtWidgets.QWidget):
         QtCore.QTimer.singleShot(500, lambda: self.main_window.canvas.set_actor_color(self.gripped_object, orig_color))
         
         self.main_window.show_toast(f"Held '{obj_link.name}' between fingers", "success")
+        return True
 
 
     def _prepare_release_targets(self):
@@ -996,118 +1754,256 @@ class SimulationPanel(QtWidgets.QWidget):
         """Drops the object at P2."""
         self._do_release()
 
-    def _move_gripper_smoothly(self):
+    def _move_gripper_smoothly(self, tcp_link=None):
         """Moves gripper joints toward targets incrementally. Returns True if all reached."""
         if not self._target_gripper_angles:
             return True
-            
-        all_done = True
-        STEP = 2.0 # Degrees per tick
-        
-        # Only enforce surface contact/rigid blocking during the GRIP state
-        enforce_collision = (self.sim_state == "GRIP")
-        
-        # We use list() because we might delete items from the dict during iteration
-        for j_name, target in list(self._target_gripper_angles.items()):
-            joint = self.main_window.robot.joints.get(j_name)
-            if not joint: continue
-            
-            # --- Store previous state for reversion if collision occurs ---
-            old_val = joint.current_value
-            # Store slave states too
-            old_slaves = {}
-            for s_id, ratio in self.main_window.robot.joint_relations.get(j_name, []):
-                if s_id in self.main_window.robot.joints:
-                    old_slaves[s_id] = self.main_window.robot.joints[s_id].current_value
 
-            diff = target - joint.current_value
-            if abs(diff) < STEP:
-                joint.current_value = target
+        step_degrees = 2.0
+        old_values = {
+            name: float(self.main_window.robot.joints[name].current_value)
+            for name in self._target_gripper_angles
+            if name in self.main_window.robot.joints
+        }
+        proposed_values = {}
+        for joint_name, target in self._target_gripper_angles.items():
+            joint = self.main_window.robot.joints.get(joint_name)
+            if joint is None:
+                continue
+            difference = float(target) - float(joint.current_value)
+            if abs(difference) <= step_degrees:
+                proposed_values[joint_name] = float(target)
             else:
-                joint.current_value += np.sign(diff) * STEP
-                all_done = False
-                
-            # Propagate to slaves
-            for s_id, ratio in self.main_window.robot.joint_relations.get(j_name, []):
-                if s_id in self.main_window.robot.joints:
-                    self.main_window.robot.joints[s_id].current_value = joint.current_value * ratio
-            
-            # Update kinematics to test the proposed position
-            self.main_window.robot.update_kinematics()
+                proposed_values[joint_name] = float(joint.current_value + np.sign(difference) * step_degrees)
 
-            # --- MULTI-PART RIGID COLLISION CHECK ---
-            if enforce_collision and self._check_gripper_collision():
-                # Revert to the last safe position just before contact
-                joint.current_value = old_val
-                for s_id, s_val in old_slaves.items():
-                    if s_id in self.main_window.robot.joints:
-                        self.main_window.robot.joints[s_id].current_value = s_val
-                
-                # Cleanup: we've reached the surface, so this target is "solved"
-                del self._target_gripper_angles[j_name]
-                self.main_window.log(f"📐 Contact: '{joint.name}' stopped at the rigid object surface.")
-                self.main_window.robot.update_kinematics()
-                continue # Joint is effectively 'reached' at the surface
-                    
+        # Apply all jaws together. A relation master is not allowed to reset a
+        # slave that has its own calculated target in this same map.
+        if hasattr(self.main_window, "_apply_gripper_target_values"):
+            self.main_window._apply_gripper_target_values(proposed_values)
+        else:
+            for joint_name, value in proposed_values.items():
+                self.main_window.robot.joints[joint_name].current_value = value
         self.main_window.robot.update_kinematics()
-        # Return True only if no targets are left to solve
+
+        if self.sim_state == "GRIP":
+            if tcp_link is None:
+                tcp_link = self._get_tcp_link()
+            try:
+                if tcp_link is not None:
+                    self._sync_object_to_jaw_contact(tcp_link)
+            except Exception as exc:
+                self.main_window.log(f"Grip contact sync skipped: {exc}")
+            for joint_name in list(self._target_gripper_angles):
+                if not self._check_gripper_collision(joint_name):
+                    continue
+                contacted_joints = self._contacting_configured_gripper_joints()
+                proposed_values[joint_name] = old_values.get(
+                    joint_name,
+                    self.main_window.robot.joints[joint_name].current_value,
+                )
+                self._gripper_contact_joint_names.update(contacted_joints or {joint_name})
+                del self._target_gripper_angles[joint_name]
+                self.main_window.log(
+                    f"📐 Contact: '{joint_name}' stopped at the rigid object surface."
+                )
+
+            if hasattr(self.main_window, "_apply_gripper_target_values"):
+                self.main_window._apply_gripper_target_values(proposed_values)
+            self.main_window.robot.update_kinematics()
+            try:
+                if tcp_link is not None:
+                    self._sync_object_to_jaw_contact(tcp_link)
+                self._log_joint_angles("Grip joint angles")
+            except Exception as exc:
+                self.main_window.log(f"Grip update logging skipped: {exc}")
+
+        all_done = all(
+            abs(float(target) - float(self.main_window.robot.joints[name].current_value)) < 1e-6
+            for name, target in self._target_gripper_angles.items()
+            if name in self.main_window.robot.joints
+        )
         return all_done or not self._target_gripper_angles
 
-    def _check_gripper_collision(self):
-        """Monitors contacts between ANY gripper-related link and the simulation object using Trimesh."""
-        item = self.objects_list.currentItem()
-        if not item: return False
-        obj_name = item.text()
-        obj_link = self.main_window.robot.links.get(obj_name)
-        if not obj_link or not obj_link.mesh: return False
-        
-        tcp_link = self._get_tcp_link() # The 'Hand'
-        if not tcp_link: return False
-        
-        # Identify 'Fingers' and ALL their recursive children
-        # (A gripper isn't just the direct child link; it's the whole sub-assembly)
-        finger_assembly = []
-        rel_joints = set()
-        for j_name, joint in self.main_window.robot.joints.items():
-            if getattr(joint, 'is_gripper', False):
-                rel_joints.add(j_name)
-            
-        for j_name in rel_joints:
-            joint = self.main_window.robot.joints.get(j_name)
-            if joint and joint.child_link:
-                # Add the finger and all its downstream geometry
-                stack = [joint.child_link]
-                while stack:
-                    curr = stack.pop()
-                    finger_assembly.append(curr)
-                    for cj in curr.child_joints:
-                        if cj.child_link: stack.append(cj.child_link)
-        
-        if not finger_assembly: 
-            finger_assembly = [tcp_link]
-            
-        # Create Collision Manager for this tick
-        try:
-            cm = trimesh.collision.CollisionManager()
-        except ValueError:
-            # Fallback if FCL backend is not properly linked or missing
-            # In this case, we'll return False (no collision detected) to allow 
-            # simulation to proceed without rigid contact, but log a warning.
-            if not getattr(self, '_collision_warn_done', False):
-                self.main_window.log("⚠ Collision Engine: FCL backend not found. Rigid contact will be disabled.")
-                self._collision_warn_done = True
+    @staticmethod
+    def _world_mesh_bounds(link):
+        """Return axis-aligned world bounds for a link mesh."""
+        mesh = getattr(link, "mesh", None)
+        if mesh is None:
+            return None
+        vertices = np.asarray(getattr(mesh, "vertices", []), dtype=float)
+        if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
+            return None
+        transform = np.asarray(link.t_world, dtype=float)
+        world_vertices = (transform[:3, :3] @ vertices[:, :3].T).T + transform[:3, 3]
+        return np.vstack((world_vertices.min(axis=0), world_vertices.max(axis=0)))
+
+    def _gripper_joint_child_links(self, joint_name):
+        """Return the child jaw assembly driven by one configured control joint."""
+        joint = self.main_window.robot.joints.get(joint_name)
+        if joint is None or joint.child_link is None:
+            return []
+
+        # A relation controls motion, not geometric ownership. Including a
+        # relation slave here made the master appear to touch whichever side
+        # the slave touched, so two contacts could incorrectly become one.
+        configured_names = set(self.main_window._configured_gripper_joint_names())
+        links = []
+        seen = set()
+        stack = [joint.child_link]
+        while stack:
+            link = stack.pop()
+            if link.name in seen:
+                continue
+            seen.add(link.name)
+            links.append(link)
+            for child_joint in link.child_joints:
+                if child_joint.name in configured_names and child_joint.name != joint_name:
+                    continue
+                if child_joint.child_link is not None:
+                    stack.append(child_joint.child_link)
+        return links
+
+    @staticmethod
+    def _world_mesh_vertices(link):
+        """Return a link mesh's vertices transformed into world coordinates."""
+        mesh = getattr(link, "mesh", None)
+        vertices = np.asarray(getattr(mesh, "vertices", []), dtype=float)
+        if vertices.ndim != 2 or vertices.shape[0] == 0 or vertices.shape[1] < 3:
+            return np.empty((0, 3), dtype=float)
+        transform = np.asarray(link.t_world, dtype=float)
+        return (transform[:3, :3] @ vertices[:, :3].T).T + transform[:3, 3]
+
+    def _jaw_contact_point_world(self, joint_name, object_center):
+        """Estimate the physical jaw point nearest the workpiece center."""
+        jaw_map = {}
+        if hasattr(self.main_window, "_saved_gripper_jaw_map"):
+            jaw_map = self.main_window._saved_gripper_jaw_map()
+        jaw = jaw_map.get(joint_name, {})
+        joint = self.main_window.robot.joints.get(joint_name)
+        local_center = jaw.get("FaceCenterLocal")
+        if joint is not None and joint.child_link is not None and local_center is not None:
+            try:
+                local_center = np.asarray(local_center, dtype=float).reshape(3)
+                transform = np.asarray(joint.child_link.t_world, dtype=float)
+                return (transform @ np.append(local_center, 1.0))[:3]
+            except (TypeError, ValueError, np.linalg.LinAlgError):
+                pass
+
+        closest_point = None
+        closest_distance = np.inf
+        for link in self._gripper_joint_child_links(joint_name):
+            mesh = getattr(link, "mesh", None)
+            if mesh is None:
+                continue
+            transform = np.asarray(link.t_world, dtype=float)
+            try:
+                local_center = (
+                    np.linalg.inv(transform) @ np.append(object_center, 1.0)
+                )[:3]
+                local_points, distances, _ = trimesh.proximity.closest_point_naive(
+                    mesh, np.asarray([local_center], dtype=float)
+                )
+                candidate = (transform @ np.append(local_points[0], 1.0))[:3]
+                distance = float(distances[0])
+            except Exception:
+                vertices = self._world_mesh_vertices(link)
+                if len(vertices) == 0:
+                    continue
+                index = int(np.argmin(np.linalg.norm(vertices - object_center, axis=1)))
+                candidate = vertices[index]
+                distance = float(np.linalg.norm(candidate - object_center))
+            if distance < closest_distance:
+                closest_point = np.asarray(candidate, dtype=float)
+                closest_distance = distance
+        return closest_point
+
+    def _joint_child_touches_object(self, joint_name, obj_link):
+        """Check contact between one selected joint's child jaw and the workpiece."""
+        jaw_links = self._gripper_joint_child_links(joint_name)
+        if not jaw_links:
             return False
 
-        cm.add_object("SIM_OBJ", obj_link.mesh, obj_link.t_world)
-        
-        for i, f_link in enumerate(finger_assembly):
-            if f_link.mesh:
-                try:
-                    cm.add_object(f"PART_{i}", f_link.mesh, f_link.t_world)
-                except Exception:
+        try:
+            manager = trimesh.collision.CollisionManager()
+            manager.add_object("TARGET", obj_link.mesh, obj_link.t_world)
+            for jaw_link in jaw_links:
+                if jaw_link.mesh is not None and manager.in_collision_single(jaw_link.mesh, jaw_link.t_world):
+                    return True
+        except Exception:
+            pass
+
+        object_bounds = self._world_mesh_bounds(obj_link)
+        if object_bounds is None:
+            return False
+        tolerance = 0.05 * self.main_window.canvas.grid_units_per_cm
+        for jaw_link in jaw_links:
+            jaw_bounds = self._world_mesh_bounds(jaw_link)
+            if jaw_bounds is None:
+                continue
+            separated = np.any(
+                (jaw_bounds[1] < object_bounds[0] - tolerance)
+                | (jaw_bounds[0] > object_bounds[1] + tolerance)
+            )
+            if not separated:
+                return True
+        return False
+
+    def _contacting_configured_gripper_joints(self):
+        obj_name = self._selected_sim_object_name()
+        obj_link = self.main_window.robot.links.get(obj_name) if obj_name else None
+        if obj_link is None or obj_link.mesh is None:
+            return set()
+        return {
+            joint_name
+            for joint_name in self.main_window._configured_gripper_joint_names()
+            if self._joint_child_touches_object(joint_name, obj_link)
+        }
+
+    def _object_is_between_jaws(self, obj_link, contact_names):
+        mesh = getattr(obj_link, "mesh", None)
+        if mesh is None:
+            return False
+        transform = np.asarray(obj_link.t_world, dtype=float)
+        object_center = (transform @ np.append(np.asarray(mesh.centroid, dtype=float), 1.0))[:3]
+        contacts = []
+        for joint_name in contact_names:
+            contact_point = self._jaw_contact_point_world(joint_name, object_center)
+            if contact_point is None:
+                continue
+            vector = contact_point - object_center
+            norm = np.linalg.norm(vector)
+            if norm > 1e-9:
+                contacts.append((joint_name, contact_point, vector / norm))
+
+        for first_index in range(len(contacts)):
+            for second_index in range(first_index + 1, len(contacts)):
+                _, first_point, first_direction = contacts[first_index]
+                _, second_point, second_direction = contacts[second_index]
+                if float(np.dot(first_direction, second_direction)) >= -0.2:
                     continue
-                
-        return cm.in_collision_internal()
+
+                # Opposing directions are necessary, but the center must also
+                # project between the two contact locations along their span.
+                span = second_point - first_point
+                span_length_sq = float(np.dot(span, span))
+                if span_length_sq <= 1e-9:
+                    continue
+                center_fraction = float(np.dot(object_center - first_point, span) / span_length_sq)
+                if -0.05 <= center_fraction <= 1.05:
+                    return True
+        return False
+
+    def _check_gripper_collision(self, joint_name=None):
+        """Check contact for one selected gripper joint's child jaw assembly."""
+        obj_name = self._selected_sim_object_name()
+        if not obj_name:
+            return False
+        obj_link = self.main_window.robot.links.get(obj_name)
+        if not obj_link or not obj_link.mesh:
+            return False
+        if joint_name is not None:
+            return self._joint_child_touches_object(joint_name, obj_link)
+        return bool(self._contacting_configured_gripper_joints())
 
 
 
@@ -1121,10 +2017,19 @@ class SimulationPanel(QtWidgets.QWidget):
             return
         if self.gripped_object not in self.main_window.robot.links:
             return
+        if self.grip_translation_offset is None:
+            if self.grip_offset is None:
+                return
+            self.grip_translation_offset = np.asarray(self.grip_offset, dtype=float)[:3, 3].copy()
+        if self.grip_translation_offset is None:
+            return
 
         obj_link = self.main_window.robot.links[self.gripped_object]
-        # Object world pose = current TCP world pose × stored relative offset
-        obj_link.t_offset = tcp_link.t_world @ self.grip_offset
+        tcp_world = np.asarray(tcp_link.t_world, dtype=float)
+        carried_pose = np.eye(4)
+        carried_pose[:3, :3] = self._ground_aligned_object_rotation(obj_link)
+        carried_pose[:3, 3] = tcp_world[:3, 3] + self.grip_translation_offset
+        obj_link.t_offset = carried_pose
         self.main_window.robot.update_kinematics()
         self.main_window.canvas.update_transforms(self.main_window.robot)
         self.main_window.simulation_tab.refresh_object_info(self.gripped_object)
@@ -1145,25 +2050,25 @@ class SimulationPanel(QtWidgets.QWidget):
 
         # Build final transform:
         #   - Translation: P2 coordinates from the spinboxes (canvas units)
-        #   - Rotation: the object's ORIGINAL rotation before it was picked up
+        #   - Rotation: preserve the object's import-side orientation
         t_release = np.eye(4)
-        if hasattr(self, 'grip_original_rotation') and self.grip_original_rotation is not None:
-            t_release[:3, :3] = self.grip_original_rotation  # preserve original orientation
-        else:
-            t_release[:3, :3] = obj_link.t_world[:3, :3]    # fallback: current orientation
+        t_release[:3, :3] = self._ground_aligned_object_rotation(obj_link)
 
         # Place at P2 world position
         # Align mesh BASE with P2 coordinates
         p2_cm = np.array([self.place_x.value(), self.place_y.value(), self.place_z.value()])
         p2_world = p2_cm * ratio
         
-        origin_z = p2_world[2]
         if obj_link.mesh:
-            # Shift origin so bottom center is at P2
-            local_min_z = obj_link.mesh.bounds[0][2]
-            origin_z = p2_world[2] - local_min_z
-
-        t_release[:3, 3] = [p2_world[0], p2_world[1], origin_z]
+            bounds = np.asarray(obj_link.mesh.bounds, dtype=float)
+            base_center_local = np.array([
+                0.5 * (bounds[0, 0] + bounds[1, 0]),
+                0.5 * (bounds[0, 1] + bounds[1, 1]),
+                bounds[0, 2],
+            ])
+            t_release[:3, 3] = p2_world - t_release[:3, :3] @ base_center_local
+        else:
+            t_release[:3, 3] = p2_world
         obj_link.t_offset = t_release
         self.main_window.robot.update_kinematics()
         self.main_window.canvas.update_transforms(self.main_window.robot)
@@ -1174,6 +2079,7 @@ class SimulationPanel(QtWidgets.QWidget):
         self.gripped_object = None
         self.grip_offset = None
         self.grip_original_rotation = None
+        self.grip_translation_offset = None
 
     def _on_task_completed(self):
         """Show a completion dialog and restore initial joint state when OK pressed."""
@@ -1286,30 +2192,48 @@ class SimulationPanel(QtWidgets.QWidget):
 
     def _finish_return(self):
         """Called after return animation completes."""
+        operation_name = (self.active_operation or "simulation").replace("_", " ").title()
         self.is_sim_active = False
-        self.start_btn.setChecked(False)
-        self.start_btn.setText("🚀 Start Simulation")
-        self.start_btn.setStyleSheet(
-            "background-color: #fdd835; color: #212121; "
-            "border-radius: 8px; font-weight: bold; font-size: 14px;"
-        )
-        self.main_window.log("✅ Returned to initial position. Simulation complete.")
+        self.active_operation = None
+        self._set_operation_running(False, f"{operation_name} complete. Robot returned to start.")
+        self.main_window.log(f"✅ Returned to initial position. {operation_name} complete.")
         self.main_window.show_toast("Back at start position", "success")
 
     def set_custom_lp(self):
-        """Activates object picking mode to set the Live Point (TCP)."""
-        self.main_window.log("🎯 Please click an object in the 3D canvas to set as Live Point (TCP).")
-        self.main_window.show_toast("Click an object in 3D view", "info")
-        self.main_window.canvas.start_object_picking(self._on_custom_lp_picked, label="Live Point")
+        """Activates face picking mode to set the Live Point (TCP)."""
+        self.main_window.log("Click a face on the robot to set the Live Point (TCP).")
+        self.main_window.show_toast("Click a robot face in 3D view", "info")
+        self.main_window.canvas.start_face_picking(self._on_custom_lp_picked, color="red")
 
-    def _on_custom_lp_picked(self, name):
-        """Callback for when an object is clicked to become the Live Point."""
+    def _on_custom_lp_picked(self, name, world_center=None, world_normal=None):
+        """Callback for when a robot face is clicked to become the Live Point."""
         if name in self.main_window.robot.links:
-            self.main_window.custom_tcp_name = name
-            self.main_window.log(f"🎯 Live Point (TCP) manually set to: '{name}' via 3D click.")
-            self.main_window.show_toast(f"Live Point set to {name}", "success")
+            picked_link = self.main_window.robot.links[name]
+            link = self.main_window._resolve_rigid_tcp_link(picked_link) if hasattr(self.main_window, '_resolve_rigid_tcp_link') else picked_link
+            if world_center is None:
+                world_center = np.array(link.t_world[:3, 3], dtype=float)
+            else:
+                world_center = np.array(world_center, dtype=float).reshape(3)
+
+            try:
+                local_point = (np.linalg.inv(np.asarray(link.t_world, dtype=float)) @ np.append(world_center, 1.0))[:3]
+            except Exception:
+                local_point = np.array(world_center, dtype=float)
+
+            committed_name = getattr(self.main_window, "locked_live_point_link_name", None)
+            if committed_name and committed_name in self.main_window.robot.links:
+                self.main_window.log(f"Live Point remains committed to '{committed_name}' from Make Robo.")
+                self.main_window.show_toast(f"Live Point locked to {committed_name}", "info")
+                self.main_window.update_live_ui()
+                return
+
+            self.main_window.custom_tcp_name = link.name
+            self.main_window.robot.set_tcp_transform(link.name, position=local_point)
+            self.main_window.robot.ensure_tcp_transform(link)
+            self.main_window.log(f"Live Point (TCP) manually set to: '{link.name}' at {np.round(world_center, 2).tolist()} via 3D click.")
+            self.main_window.show_toast(f"Live Point set to {link.name}", "success")
             self.main_window.update_live_ui()
-            
+
             # Select it in the UI list too
             items = self.objects_list.findItems(name, QtCore.Qt.MatchExactly)
             if items:
@@ -1322,15 +2246,31 @@ class SimulationPanel(QtWidgets.QWidget):
         """
         robot = self.main_window.robot
         
+        committed_tcp_name = getattr(self.main_window, "locked_live_point_link_name", None)
+        if committed_tcp_name and committed_tcp_name in robot.links:
+            link = robot.links[committed_tcp_name]
+            if hasattr(self.main_window, '_resolve_rigid_tcp_link'):
+                link = self.main_window._resolve_rigid_tcp_link(link)
+            return link
+
         # 1. Custom TCP Priority
+        custom_tcp_name = getattr(self.main_window, "custom_tcp_name", None)
+        if custom_tcp_name and custom_tcp_name in robot.links:
+            link = robot.links[custom_tcp_name]
+            if hasattr(self.main_window, '_resolve_rigid_tcp_link'):
+                link = self.main_window._resolve_rigid_tcp_link(link)
+            return link
+
         for link in robot.links.values():
-            if hasattr(link, 'custom_tcp_offset') and link.custom_tcp_offset is not None:
+            if getattr(link, 'custom_tcp_offset', None) is not None:
+                if hasattr(self.main_window, '_resolve_rigid_tcp_link'):
+                    link = self.main_window._resolve_rigid_tcp_link(link)
                 return link
 
         # 2. Gripper Designation Priority
         for joint in robot.joints.values():
-            if getattr(joint, 'is_gripper', False):
-                return joint.child_link
+            if getattr(joint, 'is_gripper', False) and joint.parent_link is not None:
+                return joint.parent_link
 
         # 3. Master R-relation Priority
         rel_joints = set()
@@ -1358,11 +2298,153 @@ class SimulationPanel(QtWidgets.QWidget):
                 
         return next((l for l in robot.links.values() if not l.is_base), None)
 
-    def _handle_state_solve(self, target_name, tcp_link, next_state, z_offset_cm=0.0):
+    def _saved_gripper_alignment_face(self):
+        """Return the saved tool face used for object-base plane alignment."""
+        payload = getattr(self.main_window, "gripper_tool_config", None)
+        if not isinstance(payload, dict):
+            payload = getattr(self.main_window, "end_effector_tool_config", None)
+        if not isinstance(payload, dict):
+            return None
+        definition = payload.get("EndEffector", payload)
+        if not isinstance(definition, dict):
+            return None
+        face = definition.get("BaseAlignmentFace")
+        return face if isinstance(face, dict) else None
+
+    @staticmethod
+    def _rotation_between_vectors(source, target):
+        """Return the shortest rotation that maps one unit direction to another."""
+        source = np.asarray(source, dtype=float).reshape(3)
+        target = np.asarray(target, dtype=float).reshape(3)
+        source_length = float(np.linalg.norm(source))
+        target_length = float(np.linalg.norm(target))
+        if source_length <= 1e-9 or target_length <= 1e-9:
+            return None
+        source /= source_length
+        target /= target_length
+
+        cosine = float(np.clip(np.dot(source, target), -1.0, 1.0))
+        if cosine >= 1.0 - 1e-9:
+            return np.eye(3)
+        if cosine <= -1.0 + 1e-9:
+            basis = np.eye(3)[int(np.argmin(np.abs(source)))]
+            axis = np.cross(source, basis)
+            axis /= np.linalg.norm(axis)
+            return (-np.eye(3)) + (2.0 * np.outer(axis, axis))
+
+        cross = np.cross(source, target)
+        sine = float(np.linalg.norm(cross))
+        skew = np.array([
+            [0.0, -cross[2], cross[1]],
+            [cross[2], 0.0, -cross[0]],
+            [-cross[1], cross[0], 0.0],
+        ])
+        return np.eye(3) + skew + (skew @ skew) * ((1.0 - cosine) / (sine * sine))
+
+    def _pick_place_alignment_axes(self, obj_link):
+        """Return the selected TCP-local face normal and saved object-base normal."""
+        face = self._saved_gripper_alignment_face()
+        if face is None or obj_link is None:
+            return None
+        try:
+            local_normal = np.asarray(
+                face["FaceNormalTCPLocal"], dtype=float
+            ).reshape(3)
+        except (KeyError, TypeError, ValueError):
+            return None
+        local_length = float(np.linalg.norm(local_normal))
+        if local_length <= 1e-9:
+            return None
+        local_normal /= local_length
+
+        object_rotation = self._pick_place_original_object_rotation
+        if object_rotation is None:
+            object_rotation = np.asarray(obj_link.t_world[:3, :3], dtype=float)
+        object_base_normal = np.asarray(object_rotation, dtype=float) @ np.array(
+            [0.0, 0.0, -1.0]
+        )
+        normal_length = float(np.linalg.norm(object_base_normal))
+        if normal_length <= 1e-9:
+            return None
+        return local_normal, object_base_normal / normal_length
+
+    def _build_pick_place_alignment_orientation(
+        self, tcp_link, obj_link, reference_rotation=None
+    ):
+        """Align the selected tool-face plane with the object's original base plane."""
+        face = self._saved_gripper_alignment_face()
+        axes = self._pick_place_alignment_axes(obj_link)
+        if face is None or axes is None:
+            if face is not None:
+                self.main_window.log(
+                    "Base-alignment face is invalid; Pick & Place will use position-only IK."
+                )
+            return None
+        local_normal, object_base_normal = axes
+        if reference_rotation is None:
+            tcp_pose = np.asarray(
+                self.main_window.robot.get_tcp_world_pose(tcp_link), dtype=float
+            )
+            current_rotation = tcp_pose[:3, :3]
+        else:
+            current_rotation = np.asarray(reference_rotation, dtype=float).reshape(3, 3)
+        current_face_normal = current_rotation @ local_normal
+
+        # Face-plane alignment accepts either normal direction. Choose the one
+        # requiring the smaller tool rotation and preserve roll as much as possible.
+        if float(np.dot(current_face_normal, -object_base_normal)) > float(
+            np.dot(current_face_normal, object_base_normal)
+        ):
+            object_base_normal = -object_base_normal
+
+        delta = self._rotation_between_vectors(current_face_normal, object_base_normal)
+        if delta is None:
+            return None
+        target_rotation = delta @ current_rotation
+        self.main_window.log(
+            f"Gripper alignment active: face '{face.get('LinkID', 'selected face')}' "
+            "will remain parallel to the object's base."
+        )
+        return target_rotation
+
+    def _solve_initial_gripper_alignment(self, tcp_link):
+        """Move to the safe P1 waypoint while aligning the selected tool face."""
+        if self._pick_place_tcp_orientation is None:
+            self.sim_state = "SOLVE_APPROACH_P1"
+            return
+
+        self.main_window.log(
+            "Moving to the safe point above P1 while aligning the selected gripper "
+            "face with the object's base..."
+        )
+        self._set_operation_running(
+            True,
+            "Pick & Place is running: approaching P1 and aligning the tool face",
+        )
+        self._handle_state_solve(
+            "P1",
+            tcp_link,
+            next_state="MOVE_ALIGN_TOOL",
+            z_offset_cm=5.0,
+            preserve_pick_place_orientation=True,
+        )
+
+    def _handle_state_solve(
+        self,
+        target_name,
+        tcp_link,
+        next_state,
+        z_offset_cm=0.0,
+        target_cm_override=None,
+        align_to_object=True,
+        preserve_pick_place_orientation=False,
+    ):
         ratio = self.main_window.canvas.grid_units_per_cm  # canvas units per cm
 
         # Target in canvas units (raw world space)
-        if target_name == "P1":
+        if target_cm_override is not None:
+            target_cm = np.asarray(target_cm_override, dtype=float).reshape(3).copy()
+        elif target_name == "P1":
             target_cm = np.array([self.pick_x.value(), self.pick_y.value(), self.pick_z.value()])
         else:
             target_cm = np.array([self.place_x.value(), self.place_y.value(), self.place_z.value()])
@@ -1375,38 +2457,22 @@ class SimulationPanel(QtWidgets.QWidget):
         # ADJUST TARGET FOR OBJECT BOTTOM-CENTER:
         # P1/P2 are locations for the object's BASE. 
         # The robot's TCP targets the object's CENTER by default.
-        grip_width, base_z_offset, _ = self._get_object_grip_width()
-        
-        # --- NEW: COVERAGE-BASED DEPTH ALIGNMENT ---
-        # Instead of just targeting the geometric center, we use finger reach 
-        # to ensure the object is "covered". 
-        world_tcp, tool_local, geo_data = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
-        
-        final_z_offset = base_z_offset
-        if isinstance(geo_data, dict) and "finger_depth" in geo_data:
-            reach = geo_data["finger_depth"]
+        final_z_offset = 0.0
+        grip_obj_link = None
+        if align_to_object:
+            _, base_z_offset, grip_obj_link = self._get_object_grip_width()
+            _, _, geo_data = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
+            final_z_offset = base_z_offset
+            if isinstance(geo_data, dict) and "finger_depth" in geo_data:
+                reach = geo_data["finger_depth"]
             # To "cover" the object: we want the finger midpoint to be at 
             # some depth relative to the object's height. 
             # If reach > object_height: reach down so tips are at bottom (cover everything).
             # If reach < object_height: reach down to max depth.
-            obj_height = base_z_offset * 2.0
-            
-            # Optimal offset: move TCP up from object base such that tips are at base.
-            # TCP is typically at midpoint of finger reach. 
-            # So tips are at TCP + reach/2? Let's check get_link_tool_point. 
-            # If TCP is the midpoint, palm is reach/2 behind, tips reach/2 ahead.
-            
-            # Aligning tips (TCP + reach/2 along approach) with object base:
-            # target_world[2] = ObjectBaseZ + reach/2
-            coverage_offset = reach / 2.0
-            
-            # Cap the offset so we don't go past the object's center if it's very tall, 
-            # but for "covering" we generally prefer going as deep as possible.
-            # If we want to cover the WHOLE object (as requested), we aim for coverage_offset.
-            final_z_offset = coverage_offset
-            self.main_window.log(f"📐 Coverage Mode: Setting Z-offset to {final_z_offset/ratio:.1f} cm to envelope object.")
-        else:
-            final_z_offset = base_z_offset
+                final_z_offset = reach / 2.0
+                self.main_window.log(
+                    f"📐 Coverage Mode: Setting Z-offset to {final_z_offset/ratio:.1f} cm to envelope object."
+                )
 
         target_world[2] += final_z_offset 
         
@@ -1432,13 +2498,106 @@ class SimulationPanel(QtWidgets.QWidget):
         # Tolerance: 0.5 cm expressed in canvas units
         tolerance_world = 0.5 * ratio
 
-        # Solve IK — target and TCP both in canvas world units
-        reached = self.main_window.robot.inverse_kinematics(
-            target_world, tcp_link,
-            max_iters=300,
-            tolerance=tolerance_world,
-            tool_offset=tool_local
+        robot = self.main_window.robot
+        target_tcp_pose = robot.get_tcp_world_pose(tcp_link).copy()
+        target_tcp_pose[:3, 3] = target_world
+
+        if preserve_pick_place_orientation and self._pick_place_tcp_orientation is not None:
+            target_tcp_pose[:3, :3] = np.asarray(self._pick_place_tcp_orientation, dtype=float).reshape(3, 3)
+
+        ik_kwargs = {
+            "max_iters": 1500,
+            "position_tolerance": tolerance_world,
+            "orientation_tolerance": 0.1,
+            "orientation_weight": 0.0,
+            "joint_change_weight": 0.2,
+        }
+        if preserve_pick_place_orientation and self._pick_place_tcp_orientation is not None:
+            ik_kwargs["orientation_weight"] = 0.25
+            ik_kwargs["orientation_tolerance"] = 0.2
+        axis_axes = self._pick_place_alignment_axes(grip_obj_link) if align_to_object and grip_obj_link is not None else None
+        use_axis_solver = (
+            align_to_object
+            and hasattr(robot, "inverse_kinematics_axis")
+            and axis_axes is not None
+            and grip_obj_link is not None
         )
+
+        try:
+            if use_axis_solver and axis_axes is not None:
+                local_axis, target_axis = axis_axes
+                reached, ik_info = robot.inverse_kinematics_axis(
+                    target_world,
+                    tcp_link,
+                    local_axis,
+                    target_axis,
+                    max_iters=ik_kwargs["max_iters"],
+                    position_tolerance=tolerance_world,
+                    axis_tolerance=np.deg2rad(7.5),
+                    axis_weight=0.8,
+                    joint_change_weight=0.2,
+                )
+                if isinstance(ik_info, dict) and "tcp_pose" in ik_info:
+                    target_tcp_pose = np.asarray(ik_info["tcp_pose"], dtype=float).copy()
+            else:
+                reached, ik_info = robot.inverse_kinematics_pose(
+                    target_tcp_pose,
+                    tcp_link,
+                    **ik_kwargs,
+                )
+        except Exception as exc:
+            if (
+                not use_axis_solver
+                and preserve_pick_place_orientation
+                and self._pick_place_tcp_orientation is not None
+                and hasattr(robot, "inverse_kinematics_axis")
+                and align_to_object
+                and grip_obj_link is not None
+                and axis_axes is None
+            ):
+                axis_axes = self._pick_place_alignment_axes(grip_obj_link)
+            if preserve_pick_place_orientation and self._pick_place_tcp_orientation is not None and axis_axes is not None and hasattr(robot, "inverse_kinematics_axis"):
+                self.main_window.log(
+                    f"Aligned IK failed for {target_name}, retrying with axis-based solve: {exc}"
+                )
+                try:
+                    local_axis, target_axis = axis_axes
+                    reached, ik_info = robot.inverse_kinematics_axis(
+                        target_world,
+                        tcp_link,
+                        local_axis,
+                        target_axis,
+                        max_iters=900,
+                        position_tolerance=tolerance_world,
+                        axis_tolerance=np.deg2rad(7.5),
+                        axis_weight=0.8,
+                        joint_change_weight=0.2,
+                    )
+                    if isinstance(ik_info, dict) and "tcp_pose" in ik_info:
+                        target_tcp_pose = np.asarray(ik_info["tcp_pose"], dtype=float).copy()
+                except Exception as fallback_exc:
+                    self.main_window.log(f"Axis-based IK failed for {target_name}: {fallback_exc}")
+                    self.toggle_pick_place_sim(False)
+                    return
+            else:
+                self.main_window.log(f"Position-only IK failed for {target_name}: {exc}")
+                self.toggle_pick_place_sim(False)
+                return
+
+        fk_pose = robot.get_tcp_world_pose(tcp_link)
+        fk_position_error = float(np.linalg.norm(fk_pose[:3, 3] - target_world))
+        fk_orientation_error = float(
+            np.arccos(
+                np.clip(
+                    (np.trace(target_tcp_pose[:3, :3].T @ fk_pose[:3, :3]) - 1.0) / 2.0,
+                    -1.0,
+                    1.0,
+                )
+            )
+        )
+        if isinstance(ik_info, dict):
+            ik_info["fk_position_error"] = fk_position_error
+            ik_info["fk_orientation_error"] = fk_orientation_error
 
         if gap:
             self.main_window.log(
@@ -1450,6 +2609,11 @@ class SimulationPanel(QtWidgets.QWidget):
             self.main_window.show_toast(f"{target_name} partially reachable", "warning")
         else:
             self.main_window.log(f"✅ IK Solved for {target_name} successfully.")
+        if isinstance(ik_info, dict) and "fk_position_error" in ik_info:
+            self.main_window.log(
+                f"   FK verify: position error {ik_info['fk_position_error']/ratio:.2f} cm | "
+                f"orientation error {np.rad2deg(ik_info['fk_orientation_error']):.1f}°"
+            )
 
         # Capture solved joint angles as targets
         self.target_joint_values = {
@@ -1457,34 +2621,32 @@ class SimulationPanel(QtWidgets.QWidget):
         }
         self.joint_chain = self.main_window.robot.get_kinematic_chain(tcp_link)  # base → TCP
 
+        planned_motion = sum(
+            abs(self.target_joint_values.get(joint.name, joint.current_value) - start_vals.get(joint.name, joint.current_value))
+            for joint in self.joint_chain
+        )
+        position_error = float(ik_info.get("fk_position_error", ik_info.get("position_error", np.inf))) if isinstance(ik_info, dict) else np.inf
+
         # Revert robot to start state — actual movement happens in MOVE state
         for n, val in start_vals.items():
             self.main_window.robot.joints[n].current_value = val
         self.main_window.robot.update_kinematics()
 
-        # --- NEW: ORIENTATION-AWARE GRIP INTELLIGENCE ---
-        # Analyze the object's narrowest vs widest dimensions to align the gripper span.
-        # We look for the object's 'principal orientations' in world space.
-        target_world_rot = None
-        _, _, obj_link = self._get_object_grip_width()
-        if obj_link and obj_link.mesh:
-            verts_w = (obj_link.t_world[:3, :3] @ obj_link.mesh.vertices.T).T + obj_link.t_world[:3, 3]
-            # Use PCA (via SVD) on vertices to find major axes
-            centroid = np.mean(verts_w, axis=0)
-            centered = verts_w - centroid
-            _, _, vh = np.linalg.svd(centered, full_matrices=False)
-            # vh[0] is major, vh[1] is secondary, vh[2] is minor (narrowest)
-            major_axis = vh[0]
-            minor_axis = vh[2] 
-            
-            # We want to align the gripper span (best_vec) with the object's narrowest axis
-            # to achieve the most centered/stable grip.
-            self.main_window.log(f"🧠 Orientation Analysis: Found narrowest axis for '{obj_link.name}'. Aligning gripper span...")
-            
-            # Propose a rotation that aligns span axis [1,0,0] with minor_axis
-            # and approach axis [0,0,1] with -Z (downward).
-            # This requires a more complex IK solver, but for now we'll log the recommendation.
-            # In a future update, we can solve for target orientation matrix.
+        if not self.joint_chain:
+            self.main_window.log("❌ Pick motion stopped: the gripper TCP has no arm-joint chain to the robot base.")
+            self.main_window.show_toast("No arm joints connected to the gripper TCP", "error")
+            self.toggle_pick_place_sim(False)
+            return
+        if planned_motion < 1e-3 and position_error > tolerance_world:
+            self.main_window.log(
+                f"❌ Pick motion stopped: IK could not produce arm movement for {target_name} "
+                f"(position error {position_error/ratio:.2f} cm)."
+            )
+            self.main_window.show_toast("Object is outside the robot workspace", "warning")
+            self.toggle_pick_place_sim(False)
+            return
+
+        self._log_joint_angles(f"{target_name} IK joint angles")
 
         self.sim_state = next_state
         self.main_window.log(f"🧠 Motion Plan for {target_name} (reached={reached}):")
@@ -1494,16 +2656,15 @@ class SimulationPanel(QtWidgets.QWidget):
         
         # --- NEW: PERFECT GRIP FEEDBACK ---
         # Get actual finger count and shape data from the tool analysis
-        _, _, geo_report = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
-        
-        finger_count = 0
-        if isinstance(geo_report, dict):
-            finger_count = len(geo_report.get('fingers_world', []))
-            self.main_window.log(f"🤏 Gripper Configuration: {finger_count} relationed components detected.")
-            self.main_window.log(f"   Shape Data  : Reach={geo_report.get('finger_depth', 0)/ratio:.1f} cm | Gap={geo_report.get('real_gap', 0)/ratio:.1f} cm")
-            self.main_window.log(f"   Grip Strategy: Centroid-averaging midpoint TCP.")
-        else:
-            self.main_window.log(f"🤏 Gripper Configuration: Standard leaf gripper detected.")
+        if align_to_object:
+            _, _, geo_report = self.main_window.get_link_tool_point(tcp_link, return_vec=True)
+            if isinstance(geo_report, dict):
+                finger_count = len(geo_report.get('fingers_world', []))
+                self.main_window.log(f"🤏 Gripper Configuration: {finger_count} relationed components detected.")
+                self.main_window.log(f"   Shape Data  : Reach={geo_report.get('finger_depth', 0)/ratio:.1f} cm | Gap={geo_report.get('real_gap', 0)/ratio:.1f} cm")
+                self.main_window.log(f"   Grip Strategy: Centroid-averaging midpoint TCP.")
+            else:
+                self.main_window.log(f"🤏 Gripper Configuration: Standard leaf gripper detected.")
 
     def _handle_sequential_motion(self):
         """
@@ -1570,22 +2731,40 @@ class SimulationPanel(QtWidgets.QWidget):
 
     def _check_global_collision(self):
         """Checks if any robot part intersections with any independent simulation object mesh."""
-        # 1. Gather independent simulation objects (exclude the one we are carrying)
-        sim_objs = [l for l in self.main_window.robot.links.values() 
-                    if getattr(l, 'is_sim_obj', False) and l.name != self.gripped_object]
+        excluded_names = {self.gripped_object}
+        if self.active_operation in ("pick_place", "welding", "painting"):
+            excluded_names.add(self._selected_sim_object_name())
+
+        # The active workpiece must be reachable by the process tool. Other objects
+        # remain collision obstacles throughout the operation.
+        sim_objs = [
+            link for link in self.main_window.robot.links.values()
+            if getattr(link, "is_sim_obj", False) and link.name not in excluded_names
+        ]
         if not sim_objs: return False
         
         # 2. Gather robot links
         robot_links = [l for l in self.main_window.robot.links.values() 
                        if not getattr(l, 'is_sim_obj', False)]
         
-        # 3. Setup collision manager for sim objects (Environment Cache)
-        # We REBUILD only if the count or objects changed (simple heuristic)
-        if self._env_collision_manager is None:
-            self._env_collision_manager = trimesh.collision.CollisionManager()
-            for i, obj in enumerate(sim_objs):
-                if obj.mesh:
-                    self._env_collision_manager.add_object(f"EXTERNAL_{i}", obj.mesh, obj.t_world)
+        # Rebuild when an obstacle moves so collision transforms never become stale.
+        signature = tuple(
+            (obj.name, tuple(np.round(np.asarray(obj.t_world).reshape(-1), 6)))
+            for obj in sim_objs
+        )
+        if self._env_collision_manager is None or signature != getattr(self, "_env_collision_signature", None):
+            try:
+                self._env_collision_manager = trimesh.collision.CollisionManager()
+                for i, obj in enumerate(sim_objs):
+                    if obj.mesh:
+                        self._env_collision_manager.add_object(f"EXTERNAL_{i}", obj.mesh, obj.t_world)
+                self._env_collision_signature = signature
+            except Exception as exc:
+                if not getattr(self, "_collision_backend_warning_shown", False):
+                    self.main_window.log(f"Collision checking is unavailable: {exc}")
+                    self._collision_backend_warning_shown = True
+                self._env_collision_manager = None
+                return False
                 
         # 4. Check each robot link against the environment
         for link in robot_links:
@@ -1599,7 +2778,7 @@ class SimulationPanel(QtWidgets.QWidget):
         if self.gripped_object:
             gripped_link = self.main_window.robot.links.get(self.gripped_object)
             if gripped_link and gripped_link.mesh:
-                if cm.in_collision_single(gripped_link.mesh, gripped_link.t_world):
+                if self._env_collision_manager.in_collision_single(gripped_link.mesh, gripped_link.t_world):
                     self.main_window.log(f"💥 Collision: Gripped object '{self.gripped_object}' hit another rigid object.")
                     return True
 
@@ -1688,13 +2867,15 @@ class SimulationPanel(QtWidgets.QWidget):
             }
         """
         
+        for button_index, button in enumerate((self.joints_btn, self.matrices_btn, self.objects_btn)):
+            button.setStyleSheet(active_style if button_index == index else inactive_style)
+
         if index == 0:
-            self.joints_btn.setStyleSheet(active_style)
-            self.matrices_btn.setStyleSheet(inactive_style)
-        else:
-            self.joints_btn.setStyleSheet(inactive_style)
-            self.matrices_btn.setStyleSheet(active_style)
+            self.refresh_joints()
+        elif index == 1:
             self.refresh_matrices()
+        elif hasattr(self.main_window, "refresh_sim_objects_list"):
+            self.main_window.refresh_sim_objects_list()
 
     def refresh_joints(self):
         # Reset ghost angle tracking dict on each refresh
@@ -1902,6 +3083,9 @@ class SimulationPanel(QtWidgets.QWidget):
             # Update Graphics
             self.main_window.canvas.update_transforms(self.main_window.robot)
             
+            # RESTORE FIXED TARGET MARKER (if locked)
+            self.restore_fixed_target_marker()
+            
             # Update Live Point Coordinates UI
             if hasattr(self.main_window, 'update_live_ui'):
                 self.main_window.update_live_ui()
@@ -1962,3 +3146,145 @@ class SimulationPanel(QtWidgets.QWidget):
 
     def update_motion_speed(self, val):
         self.motion_speed = val
+
+    def toggle_lock_live_point(self):
+        """Lock or unlock the current live point coordinates as a fixed world target."""
+        if self.live_point_locked:
+            # Unlock - remove fixed point marker and return to live tracking
+            self.live_point_locked = False
+            self.locked_live_point = None
+            self.lock_lp_btn.setText("🔓 Lock")
+            self.lock_lp_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #f5f5f5;
+                    color: #D32F2F;
+                    border: 1px solid #D32F2F;
+                    border-radius: 4px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #ffebee; }
+                QPushButton:pressed { background-color: #D32F2F; color: white; }
+            """)
+            # Remove fixed point marker from canvas
+            if hasattr(self.main_window.canvas, 'plotter'):
+                try:
+                    if "fixed_live_point_marker" in self.main_window.canvas.plotter.renderer.actors:
+                        self.main_window.canvas.plotter.remove_actor("fixed_live_point_marker")
+                    self.main_window.canvas.plotter.render()
+                except:
+                    pass
+            self.main_window.log("🔓 Live Point UNLOCKED - now tracking current robot position")
+            self.main_window.show_toast("Live Point Unlocked", "info")
+        else:
+            # Lock - capture current live point as FIXED WORLD TARGET
+            current_x = self.live_x.value()
+            current_y = self.live_y.value()
+            current_z = self.live_z.value()
+            
+            self.locked_live_point = (current_x, current_y, current_z)
+            self.live_point_locked = True
+            self.lock_lp_btn.setText("🔒 Lock")
+            self.lock_lp_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #D32F2F;
+                    color: white;
+                    border: 1px solid #D32F2F;
+                    border-radius: 4px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #c62828; }
+                QPushButton:pressed { background-color: #b71c1c; }
+            """)
+            self.main_window.log(f"🔒 Live Point LOCKED (FIXED WORLD TARGET) at: X={current_x:.2f}, Y={current_y:.2f}, Z={current_z:.2f} cm")
+            self.main_window.show_toast(f"🎯 Target Locked: ({current_x:.1f}, {current_y:.1f}, {current_z:.1f}) cm", "success")
+            
+            # Visualize FIXED TARGET POINT in 3D view as a large red sphere that NEVER MOVES
+            try:
+                import pyvista as pv
+                ratio = self.main_window.canvas.grid_units_per_cm
+                pos_world = np.array([current_x, current_y, current_z]) * ratio
+                
+                # Remove old marker if it exists
+                try:
+                    if "fixed_live_point_marker" in self.main_window.canvas.plotter.renderer.actors:
+                        self.main_window.canvas.plotter.remove_actor("fixed_live_point_marker")
+                except:
+                    pass
+                
+                # Add LARGE target sphere at FIXED world position
+                sphere = pv.Sphere(radius=2.0 * ratio, center=pos_world)
+                
+                # Add as static target marker (bright red with white outline)
+                self.main_window.canvas.plotter.add_mesh(
+                    sphere,
+                    color="#FF0000",           # Bright red
+                    opacity=0.5,              # Semi-transparent so robot can pass through
+                    name="fixed_live_point_marker",
+                    show_edges=True,
+                    edge_color="white",
+                    edge_width=3,
+                    line_width=3
+                )
+                
+                # Also add a crosshair at the target point for reference
+                crosshair_size = 3.0 * ratio
+                lines = [
+                    [pos_world - np.array([crosshair_size, 0, 0]), pos_world + np.array([crosshair_size, 0, 0])],
+                    [pos_world - np.array([0, crosshair_size, 0]), pos_world + np.array([0, crosshair_size, 0])],
+                    [pos_world - np.array([0, 0, crosshair_size]), pos_world + np.array([0, 0, crosshair_size])]
+                ]
+                for line in lines:
+                    line_mesh = pv.Line(line[0], line[1])
+                    self.main_window.canvas.plotter.add_mesh(line_mesh, color="white", line_width=2)
+                
+                self.main_window.canvas.plotter.render()
+                self.main_window.log("✅ Target visualization added - Large red sphere shows locked target position")
+            except Exception as e:
+                self.main_window.log(f"⚠️ Could not visualize target point: {e}")
+
+    def restore_fixed_target_marker(self):
+        """Restore the fixed target marker if it was accidentally removed during canvas updates."""
+        if not self.live_point_locked or self.locked_live_point is None:
+            return
+        
+        try:
+            # Check if marker still exists
+            if "fixed_live_point_marker" in self.main_window.canvas.plotter.renderer.actors:
+                return  # Already exists
+            
+            # Restore the marker
+            import pyvista as pv
+            ratio = self.main_window.canvas.grid_units_per_cm
+            current_x, current_y, current_z = self.locked_live_point
+            pos_world = np.array([current_x, current_y, current_z]) * ratio
+            
+            # Re-add target sphere
+            sphere = pv.Sphere(radius=2.0 * ratio, center=pos_world)
+            self.main_window.canvas.plotter.add_mesh(
+                sphere,
+                color="#FF0000",
+                opacity=0.5,
+                name="fixed_live_point_marker",
+                show_edges=True,
+                edge_color="white",
+                edge_width=3
+            )
+            
+            # Re-add crosshair
+            crosshair_size = 3.0 * ratio
+            lines = [
+                [pos_world - np.array([crosshair_size, 0, 0]), pos_world + np.array([crosshair_size, 0, 0])],
+                [pos_world - np.array([0, crosshair_size, 0]), pos_world + np.array([0, crosshair_size, 0])],
+                [pos_world - np.array([0, 0, crosshair_size]), pos_world + np.array([0, 0, crosshair_size])]
+            ]
+            for line in lines:
+                line_mesh = pv.Line(line[0], line[1])
+                self.main_window.canvas.plotter.add_mesh(line_mesh, color="white", line_width=2)
+            
+            self.main_window.canvas.plotter.render()
+            self.main_window.log("🔄 Fixed target marker restored")
+        except Exception as e:
+            self.main_window.log(f"⚠️ Could not restore target marker: {e}")
+

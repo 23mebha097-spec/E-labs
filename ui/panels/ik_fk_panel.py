@@ -128,14 +128,7 @@ class IKFKPanel(QtWidgets.QWidget):
         self.run_fk_btn.clicked.connect(self.solve_fk)
         fk_section.addWidget(self.run_fk_btn)
 
-        # Key Point Button (Using XYZ from IK tabs)
-        self.key_btn = QtWidgets.QPushButton("Key")
-        self.key_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.key_btn.setFixedHeight(50)
-        self.key_btn.setStyleSheet(self._btn_style("#1976d2"))
-        self.key_btn.setToolTip("Take X,Y,Z from IK tabs, mark the point, and go to it")
-        self.key_btn.clicked.connect(self.key_to_ik_point)
-        fk_section.addWidget(self.key_btn)
+        # (Removed) Key Point Button
 
         root.addStretch()
         self.rebuild_dh_table()
@@ -241,9 +234,19 @@ class IKFKPanel(QtWidgets.QWidget):
                 return -1
             return len(robot.get_kinematic_chain(link))
 
+        committed_tcp = getattr(self.mw, "locked_live_point_link_name", None)
+        if committed_tcp and committed_tcp in robot.links:
+            link = robot.links[committed_tcp]
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                link = self.mw._resolve_rigid_tcp_link(link)
+            return link
+
         custom_tcp = getattr(self.mw, "custom_tcp_name", None)
         if custom_tcp and custom_tcp in robot.links:
-            return robot.links[custom_tcp]
+            link = robot.links[custom_tcp]
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                link = self.mw._resolve_rigid_tcp_link(link)
+            return link
 
         tcp_candidates = [
             link for link in robot.links.values()
@@ -393,12 +396,30 @@ class IKFKPanel(QtWidgets.QWidget):
         def chain_len(link):
             return len(self.mw.robot.get_kinematic_chain(link))
 
+        committed_tcp_name = getattr(self.mw, "locked_live_point_link_name", None)
+        if committed_tcp_name and committed_tcp_name in self.mw.robot.links:
+            link = self.mw.robot.links[committed_tcp_name]
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                link = self.mw._resolve_rigid_tcp_link(link)
+            return link
+
         # 1. Custom TCP
+        custom_tcp_name = getattr(self.mw, "custom_tcp_name", None)
+        if custom_tcp_name and custom_tcp_name in self.mw.robot.links:
+            link = self.mw.robot.links[custom_tcp_name]
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                link = self.mw._resolve_rigid_tcp_link(link)
+            return link
+
         tcp_candidates = [l for l in links if getattr(l, "custom_tcp_offset", None) is not None]
-        if tcp_candidates: return max(tcp_candidates, key=chain_len)
+        if tcp_candidates:
+            link = max(tcp_candidates, key=chain_len)
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                link = self.mw._resolve_rigid_tcp_link(link)
+            return link
 
         # 2. Gripper
-        gripper_candidates = [j.child_link for j in self.mw.robot.joints.values() if getattr(j, "is_gripper", False)]
+        gripper_candidates = [j.parent_link for j in self.mw.robot.joints.values() if getattr(j, "is_gripper", False) and j.parent_link is not None]
         if gripper_candidates: return max(gripper_candidates, key=chain_len)
 
         # 3. Leaf nodes
@@ -427,22 +448,7 @@ class IKFKPanel(QtWidgets.QWidget):
         if joint_ids:
             self.mw._start_joint_animation(joint_ids, child_names, targets)
 
-    def key_to_ik_point(self):
-        """Creates a visual target point and solves IK in one step."""
-        # 1. Get Target from IK tabs
-        tx, ty, tz = self.ik_x.value(), self.ik_y.value(), self.ik_z.value()
-        target = np.array([tx, ty, tz])
-        
-        # 2. Visualize the point in 3D (Marker)
-        import pyvista as pv
-        marker = pv.Sphere(radius=1.5, center=target)
-        self.mw.canvas.plotter.add_mesh(marker, color="#ff5722", name="ik_key_target", pickable=False)
-        self.mw.canvas.plotter.render()
-        
-        self.mw.log(f"📍 Keying point: ({tx:.1f}, {ty:.1f}, {tz:.1f})")
-        
-        # 3. Solve IK and move
-        self.solve_ik()
+    # key_to_ik_point removed — no key button in UI anymore
 
     def refresh_sliders(self):
         self.rebuild_dh_table()
@@ -453,3 +459,4 @@ class IKFKPanel(QtWidgets.QWidget):
         if joint_tab and child_name in joint_tab.joints:
             joint_id = joint_tab.joints[child_name].get("joint_id", child_name)
         self._sync_fk_current_angle(joint_id, value)
+

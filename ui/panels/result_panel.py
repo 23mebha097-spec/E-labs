@@ -56,6 +56,9 @@ class ResultPanel(QtWidgets.QWidget):
             ee_result = fk_results[-1]
             T_matrix = ee_result["cumulative"]
 
+        if p is None and T_matrix is not None:
+            p = T_matrix[:3, 3]
+
         if T_matrix is None:
             self.result_view.setHtml(
                 "<div style='margin-top: 50px; text-align: center;'>"

@@ -33,6 +33,36 @@ class IKPostureTest(unittest.TestCase):
 
         self.assertLess(neutral_penalty, folded_penalty)
 
+    def test_axis_ik_aligns_selected_face_without_constraining_roll(self):
+        robot = Robot()
+        base = robot.add_link("base")
+        tool = robot.add_link("tool")
+        robot.base_link = base
+
+        joint = robot.add_joint("wrist", "base", "tool")
+        joint.axis = np.array([0.0, 0.0, 1.0])
+        joint.min_limit = -180.0
+        joint.max_limit = 180.0
+        robot.update_kinematics()
+
+        reached, info = robot.inverse_kinematics_axis(
+            [0.0, 0.0, 0.0],
+            tool,
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            max_iters=300,
+            position_tolerance=1e-3,
+            axis_tolerance=np.deg2rad(1.0),
+        )
+
+        aligned_axis = (
+            robot.get_tcp_world_pose(tool)[:3, :3]
+            @ np.array([1.0, 0.0, 0.0])
+        )
+        self.assertTrue(reached)
+        self.assertLess(info["axis_error"], np.deg2rad(1.0))
+        np.testing.assert_allclose(aligned_axis, [0.0, 1.0, 0.0], atol=0.01)
+
 
 if __name__ == "__main__":
     unittest.main()

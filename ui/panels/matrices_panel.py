@@ -80,8 +80,9 @@ class MatricesPanel(QtWidgets.QWidget):
             glay.setContentsMargins(10, 8, 10, 8)
             
             # Label: Custom Name Only
-            custom_name = data.get('custom_name', f"{data['parent']} \u2192 {child_name}")
-            lbl = QtWidgets.QLabel(f"{custom_name} ({['X','Y','Z'][data['axis']]})")
+            custom_name = data.get('custom_name', f"{data.get('parent', '?')} \u2192 {child_name}")
+            axis_index = self._axis_index(data)
+            lbl = QtWidgets.QLabel(f"{custom_name} ({['X','Y','Z'][axis_index]})")
             lbl.setStyleSheet("color: #1976d2; font-weight: bold; font-size: 13px;")
             glay.addWidget(lbl)
             
@@ -89,8 +90,11 @@ class MatricesPanel(QtWidgets.QWidget):
             row = QtWidgets.QHBoxLayout()
             
             slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-            slider.setRange(int(data['min'] * 10), int(data['max'] * 10))
-            slider.setValue(int(data.get('current_angle', 0.0) * 10))
+            min_limit = float(data.get('min', -180.0))
+            max_limit = float(data.get('max', 180.0))
+            current_angle = float(data.get('current_angle', 0.0))
+            slider.setRange(int(min_limit * 10), int(max_limit * 10))
+            slider.setValue(int(current_angle * 10))
             slider.setCursor(QtCore.Qt.PointingHandCursor)
             slider.setStyleSheet("""
                 QSlider::groove:horizontal {
@@ -118,8 +122,8 @@ class MatricesPanel(QtWidgets.QWidget):
             """)
             
             spin = QtWidgets.QDoubleSpinBox()
-            spin.setRange(data['min'], data['max'])
-            spin.setValue(data.get('current_angle', 0.0))
+            spin.setRange(min_limit, max_limit)
+            spin.setValue(current_angle)
             spin.setFixedWidth(70)
             spin.setStyleSheet("""
                 QDoubleSpinBox {
@@ -176,6 +180,15 @@ class MatricesPanel(QtWidgets.QWidget):
             if any(s_id == joint_id for s_id, _ in slaves):
                 return True
         return False
+
+    def _axis_index(self, data):
+        axis = data.get("axis", 2)
+        if isinstance(axis, str):
+            axis = {"X": 0, "Y": 1, "Z": 2}.get(axis.upper(), 2)
+        try:
+            return int(np.clip(int(axis), 0, 2))
+        except Exception:
+            return 2
 
     def _display_value(self, value):
         # Clamp tiny floating artifacts such as 6.123e-17 for cleaner UI output.

@@ -26,7 +26,25 @@ from PyQt5 import QtCore, QtWidgets
 
 HOME_POSITION = 0.0
 
-DEFAULT_STARTUP_PROJECT = os.path.join(os.path.dirname(__file__), "assets", "default_robot.trn")
+DEFAULT_STARTUP_PROJECT = r"C:\Users\Bhavin\OneDrive\Desktop\bHaViN\120905\check-1 89884\once again\2207.trm"
+
+
+def resolve_startup_project(argv):
+    """Return the project that should be loaded when the application starts."""
+    if "--no-startup" in argv:
+        return None
+
+    candidates = [arg for arg in argv if arg != "--no-startup"]
+    if candidates:
+        requested = candidates[0]
+        if os.path.exists(requested):
+            return requested
+        print(
+            f"[startup] Ignoring missing startup project '{requested}'; using default.",
+            flush=True,
+        )
+
+    return DEFAULT_STARTUP_PROJECT
 
 
 
@@ -146,29 +164,29 @@ def main():
 
         window.show()
 
-
-
-        args = [arg for arg in sys.argv[1:] if arg != "--no-startup"]
-
-        startup_project = None if "--no-startup" in sys.argv[1:] else (args[0] if args else DEFAULT_STARTUP_PROJECT)
+        startup_project = resolve_startup_project(sys.argv[1:])
 
         if startup_project and os.path.exists(startup_project):
-
-            QtCore.QTimer.singleShot(
-
-                0,
-
-                lambda path=startup_project: window.load_project_from_path(
-
-                    path,
-
+            def load_startup_project(attempt=1):
+                ok = window.load_project_from_path(
+                    startup_project,
                     show_dialogs=False,
+                    auto_finalize=True,
+                )
+                if ok:
+                    print(f"[startup] Loaded project: {startup_project}", flush=True)
+                    return
 
-                    auto_finalize=False,
+                if attempt == 1:
+                    print(
+                        f"[startup] Initial load failed for {startup_project}; retrying after the UI settles.",
+                        flush=True,
+                    )
+                    QtCore.QTimer.singleShot(750, lambda: load_startup_project(attempt=2))
+                else:
+                    print(f"[startup] Failed to load startup project: {startup_project}", flush=True)
 
-                ),
-
-            )
+            QtCore.QTimer.singleShot(150, load_startup_project)
 
 
 

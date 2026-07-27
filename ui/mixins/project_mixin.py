@@ -3,11 +3,32 @@ import os
 import numpy as np
 
 from core.robot import Robot
-from core.import_units import get_engine_internal_unit
+from core.import_units import get_engine_internal_unit, rotation_matrix_for_up_axis
+
+
+PROJECT_FILE_EXTENSIONS = (".trm", ".trn", ".zip")
+PROJECT_FILE_FILTER = (
+    "Project Files (*.trm *.trn *.zip);;"
+    "Robot Project (*.trm *.trn);;"
+    "Zip Archive (*.zip);;"
+    "All Files (*)"
+)
+DEFAULT_PROJECT_EXTENSION = ".trm"
+
+
+def project_mesh_filename(index):
+    """Return a Windows-safe archive filename independent of the link name."""
+    return f"link_{int(index):04d}.stl"
+
+
+def ensure_project_extension(file_path):
+    if file_path.lower().endswith(PROJECT_FILE_EXTENSIONS):
+        return file_path
+    return f"{file_path}{DEFAULT_PROJECT_EXTENSION}"
 
 
 class ProjectMixin:
-    """Methods for saving and loading robot project files (.trn)."""
+    """Methods for saving and loading robot project files (.trm/.trn)."""
 
     def _project_dialog_dir(self):
         candidate = getattr(self, "last_project_dir", "") or os.getcwd()
@@ -16,6 +37,75 @@ class ProjectMixin:
         if not candidate or not os.path.isdir(candidate):
             candidate = os.getcwd()
         return candidate
+
+    def _resolve_project_mesh_path(self, temp_dir, mesh_reference):
+        """Resolve mesh paths from current and legacy project archive layouts."""
+        if not mesh_reference:
+            return None
+
+        normalized = str(mesh_reference).replace("\\", "/").lstrip("/")
+        direct_path = os.path.normpath(os.path.join(temp_dir, *normalized.split("/")))
+        if os.path.isfile(direct_path):
+            return direct_path
+
+        # Older project writers sometimes stored meshes at the archive root or
+        # below an extra project folder. Recover those files by basename.
+        target_name = os.path.basename(normalized).casefold()
+        for root, _dirs, files in os.walk(temp_dir):
+            for filename in files:
+                if filename.casefold() == target_name:
+                    return os.path.join(root, filename)
+        return None
+
+    def _recover_project_mesh_from_source(self, link_data, source_cache=None):
+        """Rebuild a missing embedded mesh from saved STEP/import metadata."""
+        metadata = link_data.get("import_metadata", {})
+        if not isinstance(metadata, dict):
+            return None
+        source_path = metadata.get("source_path")
+        component_name = metadata.get("source_component_name")
+        if not source_path or not os.path.isfile(source_path):
+            return None
+
+        cache = source_cache if isinstance(source_cache, dict) else {}
+        if source_path not in cache:
+            try:
+                import trimesh
+
+                loaded = trimesh.load(source_path)
+                payload = self._finalize_loaded_mesh(source_path, loaded)
+                if isinstance(payload, list):
+                    cache[source_path] = {
+                        str(part.get("name")): part.get("mesh")
+                        for part in payload
+                        if isinstance(part, dict) and part.get("mesh") is not None
+                    }
+                elif hasattr(payload, "vertices"):
+                    cache[source_path] = {"": payload}
+                else:
+                    cache[source_path] = {}
+            except Exception as exc:
+                self.log(
+                    f"WARNING: Could not recover missing project meshes from "
+                    f"'{source_path}': {exc}"
+                )
+                cache[source_path] = {}
+
+        source_meshes = cache.get(source_path, {})
+        mesh = source_meshes.get(str(component_name))
+        if mesh is None and len(source_meshes) == 1:
+            mesh = next(iter(source_meshes.values()))
+        if mesh is None:
+            return None
+
+        recovered = mesh.copy()
+        scale = float(metadata.get("scale_to_internal", 1.0) or 1.0)
+        if abs(scale - 1.0) > 1e-12:
+            recovered.apply_scale(scale)
+        axis_rotation = rotation_matrix_for_up_axis(metadata.get("up_axis", "preserve"))
+        if not np.allclose(axis_rotation, np.eye(4)):
+            recovered.apply_transform(axis_rotation)
+        return recovered
 
     def _detect_legacy_project_scale(self, robot_data, temp_dir):
         """Detect older project files saved in meters before internal-mm normalization."""
@@ -42,8 +132,8 @@ class ProjectMixin:
             mesh_rel_path = link.get("mesh_file")
             if not mesh_rel_path:
                 continue
-            mesh_path = os.path.join(temp_dir, mesh_rel_path)
-            if not os.path.exists(mesh_path):
+            mesh_path = self._resolve_project_mesh_path(temp_dir, mesh_rel_path)
+            if mesh_path is None:
                 continue
             mesh = trimesh.load(mesh_path)
             if isinstance(mesh, trimesh.Scene):
@@ -106,14 +196,14 @@ class ProjectMixin:
                     data["custom_tcp_offset"] = (np.array(data["custom_tcp_offset"], dtype=float) * scale_factor).tolist()
 
     def save_project(self):
-        """Saves current robot configuration into a .trn zip file."""
+        """Saves current robot configuration into a robot project zip file."""
         import json
         import zipfile
         import io
         import tempfile
         import shutil
 
-        default_filename = "project.trn"
+        default_filename = f"project{DEFAULT_PROJECT_EXTENSION}"
         if hasattr(self, "current_session_index") and self.current_session_index >= 0:
             sess = self.robot_sessions[self.current_session_index]
             if sess.get("project_file_path"):
@@ -121,19 +211,18 @@ class ProjectMixin:
             elif hasattr(self, "session_tab_bar"):
                 tab_title = self.session_tab_bar.tabText(self.current_session_index)
                 if tab_title != "ToRoTrOn" and not tab_title.startswith("Robo "):
-                    default_filename = f"{tab_title}.trn"
+                    default_filename = f"{tab_title}{DEFAULT_PROJECT_EXTENSION}"
 
         file_path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Project",
             os.path.join(self._project_dialog_dir(), default_filename),
-            "ToRoTRoN Project (*.trn);;Zip Archive (*.zip);;All Files (*)"
+            PROJECT_FILE_FILTER
         )
         if not file_path:
             return
             
-        if not file_path.lower().endswith(('.trn', '.zip')):
-            file_path += '.trn'
+        file_path = ensure_project_extension(file_path)
         self.last_project_dir = os.path.dirname(file_path)
 
         try:
@@ -152,17 +241,22 @@ class ProjectMixin:
                         "alignment_point": None,
                         "alignment_normal": None,
                         "alignment_cache": {},
+                        "rigid_groups": [],
                         "current_speed": 50,
                         "camera_position": None,
                         "import_preferences": {},
+                        "end_effector_tool_config": None,
                         "last_project_dir": getattr(self, "last_project_dir", os.getcwd()),
                     },
                     "joint_relations": {}
                 }
 
                 # 1. Gather Links
-                for name, link in self.robot.links.items():
-                    mesh_filename = f"{name}.stl"
+                for link_index, (name, link) in enumerate(self.robot.links.items()):
+                    # Link names may contain Windows-reserved characters such as
+                    # ':'. Using them as filenames creates NTFS alternate streams
+                    # that disappear from the ZIP archive.
+                    mesh_filename = project_mesh_filename(link_index)
                     mesh_path = os.path.join(mesh_dir, mesh_filename)
                     
                     # Export mesh
@@ -194,7 +288,10 @@ class ProjectMixin:
                         "axis": joint.axis.tolist(),
                         "min_limit": joint.min_limit,
                         "max_limit": joint.max_limit,
-                        "current_value": joint.current_value
+                        "current_value": joint.current_value,
+                        "linear_units_per_cm": getattr(joint, "linear_units_per_cm", 10.0),
+                        "is_gripper": bool(getattr(joint, "is_gripper", False)),
+                        "is_rigid_attachment": bool(getattr(joint, "is_rigid_attachment", False)),
                     })
                 if saved_home:
                     robot_data["ui_state"]["home_joint_values"] = {
@@ -233,6 +330,19 @@ class ProjectMixin:
                         serializable_cache[f"{p}|||{c}"] = pt.tolist()
                     robot_data["ui_state"]["alignment_cache"] = serializable_cache
 
+                rigid_groups = getattr(self, "rigid_groups", [])
+                if isinstance(rigid_groups, list):
+                    robot_data["ui_state"]["rigid_groups"] = [
+                        {
+                            "group_id": str(group.get("group_id", "")),
+                            "anchor": str(group.get("anchor", "")),
+                            "members": list(group.get("members", [])),
+                            "joint_names": list(group.get("joint_names", [])),
+                        }
+                        for group in rigid_groups
+                        if isinstance(group, dict)
+                    ]
+
                 # Speed
                 if hasattr(self, 'current_speed'):
                     robot_data["ui_state"]["current_speed"] = self.current_speed
@@ -243,6 +353,10 @@ class ProjectMixin:
 
                 if hasattr(self, "import_preferences"):
                     robot_data["ui_state"]["import_preferences"] = dict(self.import_preferences)
+
+                tool_config = getattr(self, "end_effector_tool_config", None)
+                if isinstance(tool_config, dict):
+                    robot_data["ui_state"]["end_effector_tool_config"] = tool_config
 
                 # 4. Write JSON
                 json_path = os.path.join(temp_dir, "robot.json")
@@ -275,7 +389,7 @@ class ProjectMixin:
             QtWidgets.QMessageBox.critical(self, "Save Error", f"Could not save project: {str(e)}")
 
     def load_project_from_path(self, file_path, show_dialogs=True, auto_finalize=True):
-        """Loads a robot configuration from a .trn zip file path."""
+        """Loads a robot configuration from a .trm/.trn zip file path."""
         import json
         import zipfile
         import tempfile
@@ -303,6 +417,14 @@ class ProjectMixin:
             self.canvas.fixed_actors.clear()
             self.links_list.clear()
             self.alignment_cache = {}
+            self.rigid_groups = []
+            self.custom_tcp_name = None
+            self.end_effector_tool_config = None
+            self.gripper_tool_config = None
+            self.welding_tool_config = None
+            self.paint_tool_config = None
+            self.active_gripper_joint_names = []
+            self.active_gripper_joint_name = None
 
             # Reset UI Panels
             if hasattr(self, 'joint_tab'):
@@ -338,23 +460,33 @@ class ProjectMixin:
                     self._scale_legacy_project_data(robot_data, legacy_scale_factor)
 
                 # 4. Load Links
+                recovered_source_meshes = {}
                 for l_data in robot_data["links"]:
                     QtWidgets.QApplication.processEvents()
                     name = l_data["name"]
                     mesh_rel_path = l_data["mesh_file"]
-                    mesh_path = os.path.join(temp_dir, mesh_rel_path)
-                    
-                    if not os.path.exists(mesh_path):
-                        self.log(f"WARNING: Mesh file missing for {name}")
-                        continue
+                    mesh_path = self._resolve_project_mesh_path(temp_dir, mesh_rel_path)
 
-                    raw_mesh = trimesh.load(mesh_path)
-                    if isinstance(raw_mesh, trimesh.Scene):
-                        mesh = raw_mesh.to_mesh()
+                    if mesh_path is None:
+                        mesh = self._recover_project_mesh_from_source(
+                            l_data,
+                            recovered_source_meshes,
+                        )
+                        if mesh is None:
+                            self.log(f"WARNING: Mesh file missing for {name}")
+                            continue
+                        self.log(
+                            f"Recovered missing embedded mesh for '{name}' from "
+                            f"'{l_data.get('import_metadata', {}).get('source_path')}'."
+                        )
                     else:
-                        mesh = raw_mesh
+                        raw_mesh = trimesh.load(mesh_path)
+                        if isinstance(raw_mesh, trimesh.Scene):
+                            mesh = raw_mesh.to_mesh()
+                        else:
+                            mesh = raw_mesh
 
-                    if abs(legacy_scale_factor - 1.0) > 1e-12:
+                    if mesh_path is not None and abs(legacy_scale_factor - 1.0) > 1e-12:
                         mesh.apply_scale(legacy_scale_factor)
                         
                     link = self.robot.add_link(name, mesh)
@@ -377,6 +509,12 @@ class ProjectMixin:
                     self.add_link_item(name)
                     self.canvas.update_link_mesh(name, mesh, link.t_offset, color=link.color)
 
+                if robot_data.get("links") and not self.robot.links:
+                    raise Exception(
+                        "The project contains robot links, but none of its embedded mesh files could be found. "
+                        "Please open a complete .trm/.trn project archive created with Save."
+                    )
+
                 # 5. Load Joints (Robot Core)
                 for j_data in robot_data["joints"]:
                     QtWidgets.QApplication.processEvents()
@@ -392,6 +530,9 @@ class ProjectMixin:
                         joint.min_limit = j_data.get("min_limit", -180.0)
                         joint.max_limit = j_data.get("max_limit", 180.0)
                         joint.current_value = j_data.get("current_value", 0.0)
+                        joint.linear_units_per_cm = j_data.get("linear_units_per_cm", 10.0)
+                        joint.is_gripper = bool(j_data.get("is_gripper", False))
+                        joint.is_rigid_attachment = bool(j_data.get("is_rigid_attachment", False))
 
                 # 5b. Load Joint Relations
                 self.robot.joint_relations = robot_data.get("joint_relations", {})
@@ -402,6 +543,37 @@ class ProjectMixin:
 
                 # 6. Load UI State
                 ui_state = robot_data.get("ui_state", {})
+                saved_tool_config = ui_state.get("end_effector_tool_config")
+                self.end_effector_tool_config = (
+                    saved_tool_config if isinstance(saved_tool_config, dict) else None
+                )
+                self.gripper_tool_config = None
+                self.welding_tool_config = None
+                self.paint_tool_config = None
+                self.active_gripper_joint_names = []
+                self.active_gripper_joint_name = None
+                if isinstance(saved_tool_config, dict):
+                    definition = saved_tool_config.get("EndEffector", saved_tool_config)
+                    tool_type = str(definition.get("ToolType", "")).strip().lower()
+                    if tool_type == "gripper tool":
+                        self.gripper_tool_config = saved_tool_config
+                        jaw_names = [
+                            str(jaw.get("JointID"))
+                            for jaw in definition.get("Jaws", [])
+                            if isinstance(jaw, dict) and jaw.get("JointID") in self.robot.joints
+                        ]
+                        self.active_gripper_joint_names = jaw_names
+                        self.active_gripper_joint_name = jaw_names[0] if jaw_names else None
+                        for joint_name in jaw_names:
+                            self.robot.joints[joint_name].is_gripper = True
+                        tcp_name = definition.get("TCPLink")
+                        if tcp_name in self.robot.links:
+                            self.custom_tcp_name = tcp_name
+                    elif tool_type == "welding tool":
+                        self.welding_tool_config = saved_tool_config
+                    elif tool_type == "painting tool":
+                        self.paint_tool_config = saved_tool_config
+
                 saved_home = ui_state.get("home_joint_values")
                 if isinstance(saved_home, dict):
                     self.robot.home_joint_values.update({
@@ -437,6 +609,20 @@ class ProjectMixin:
                     if "|||" in key:
                         p, c = key.split("|||")
                         self.alignment_cache[(p, c)] = np.array(pt)
+
+                rigid_groups = ui_state.get("rigid_groups", [])
+                self.rigid_groups = [
+                    {
+                        "group_id": str(group.get("group_id", "")),
+                        "anchor": str(group.get("anchor", "")),
+                        "members": list(group.get("members", [])),
+                        "joint_names": list(group.get("joint_names", [])),
+                    }
+                    for group in rigid_groups
+                    if isinstance(group, dict)
+                ]
+                if hasattr(self, "_refresh_rigid_groups_list"):
+                    self._refresh_rigid_groups_list()
 
                 # Restore the UI Joint panels and re-render visual joints.
                 # During silent startup loading, skip the eager rebuild because it
@@ -491,8 +677,20 @@ class ProjectMixin:
 
             # 7. Final Update
             self.robot.update_kinematics()
+            if hasattr(self, "joint_tab") and hasattr(self.joint_tab, "rigidize_touching_free_components"):
+                rigid_created = self.joint_tab.rigidize_touching_free_components(self.robot.base_link)
+                if rigid_created:
+                    self.log(
+                        f"Rigid follow-through recovered on load: {rigid_created} touching component(s) now move with their parent."
+                    )
             self.canvas.update_transforms(self.robot)
             self.update_link_colors()
+            if (
+                isinstance(getattr(self, "gripper_tool_config", None), dict)
+                and hasattr(self, "gripper_tab")
+                and hasattr(self.gripper_tab, "restore_saved_gripper_config")
+            ):
+                self.gripper_tab.restore_saved_gripper_config(self.gripper_tool_config)
             if hasattr(self, "update_live_ui"):
                 self.update_live_ui(render=False)
             
@@ -532,12 +730,12 @@ class ProjectMixin:
             return False
 
     def load_project(self):
-        """Loads a robot configuration from a .trn zip file."""
+        """Loads a robot configuration from a .trm/.trn zip file."""
         file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open Project",
             self._project_dialog_dir(),
-            "Project Files (*.trn *.zip);;ToRoTRoN Project (*.trn);;Zip Archive (*.zip);;All Files (*)"
+            PROJECT_FILE_FILTER
         )
         if not file_path:
             return False
@@ -562,6 +760,7 @@ class ProjectMixin:
             self.canvas.fixed_actors.clear()
             self.links_list.clear()
             self.alignment_cache = {}
+            self.rigid_groups = []
 
             # Reset UI Panels
             if hasattr(self, 'joint_tab'):

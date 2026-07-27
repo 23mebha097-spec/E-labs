@@ -96,8 +96,8 @@ class NavigationMixin:
         self.links_list.setCurrentItem(None)
         self.set_base_btn.setText("Set as Base")
         
-        # Reset Align Tool selection state
-        self.align_tab.reset_panel()
+        if hasattr(self, "align_tab"):
+            self.align_tab.reset_panel()
 
     def on_focus_base(self):
         if not self.robot.base_link:
@@ -115,34 +115,30 @@ class NavigationMixin:
         """Saves a 3D visual transformation back to the robot link model."""
         if name not in self.robot.links:
             return
-            
+
         link = self.robot.links[name]
-        
-        # --- BASE PROTECTION RULE: The Base is functionally fixed at (0,0,0) ---
-        if link.is_base:
-            self.log(f"⚠️ Locked: '{name}' is the Base and its position is frozen.")
-            return
-        
+        matrix = np.array(matrix, dtype=float)
+
         if link.parent_joint:
-            # Solve for local offset in parent-joint frame
-            parent_world = link.parent_joint.parent_link.t_world
-            joint_rot = link.parent_joint.get_matrix()
-            
+            # Solve for local offset in parent-joint frame.
+            parent_world = np.array(link.parent_joint.parent_link.t_world, dtype=float)
+            joint_rot = np.array(link.parent_joint.get_matrix(), dtype=float)
+
             # Child_World = Parent_World @ Joint_Matrix @ Child_Offset
             # => Child_Offset = Inv(Joint_Matrix) @ Inv(Parent_World) @ Matrix
             inv_parent = np.linalg.inv(parent_world)
             inv_joint = np.linalg.inv(joint_rot)
-            
             link.t_offset = inv_joint @ inv_parent @ matrix
         else:
-            # It's a root/floating link, offset is absolute world position
+            # Root/floating link: preserve the assembly root pose.
             link.t_offset = matrix
-            
+
         self.robot.update_kinematics()
         self.update_link_colors()
         self.log(f"Synced coordinates for: {name}")
-        # Re-run kinematics to ensure the whole branch moves correctly
+        # Re-run kinematics so any children follow the moved base/root link.
         self.robot.update_kinematics()
+        self.canvas.update_transforms(self.robot)
         self.update_live_ui()
 
     def switch_panel(self, index):
@@ -189,89 +185,129 @@ class NavigationMixin:
             self.speed_spin.blockSignals(False)
         self.show_speed_overlay()
 
-    def update_live_ui(self, render=True):
+    def update_live_ui(self, render=True, force_top_face=False):
         """Updates the Live Point (LP) coordinates and handles Pick-and-Place simulation logic."""
         tcp_link = None
         if hasattr(self, "_get_preferred_tcp_link"):
             tcp_link = self._get_preferred_tcp_link()
 
-        if not tcp_link:
-            # Fallback: Find the physically "top-most" point among all links
-            best_z = -float('inf')
-            for link in self.robot.links.values():
-                if link.is_base: continue
-                # Get the tool point (top center of this specific link)
-                w_pos, _, _ = self.get_link_tool_point(link)
-                if w_pos[2] > best_z:
-                    best_z = w_pos[2]
-                    tcp_link = link
-        if tcp_link:
-            self._refresh_auto_tcp_offset(tcp_link)
+        # Use global live-point lock if present, otherwise fall back to sim panel lock.
+        locked = False
+        pos = None
+        ratio = self.canvas.grid_units_per_cm
+        sim_panel = getattr(self, 'simulation_tab', None)
 
-            # Use the kinematic TCP pose for coordinate display.
-            # This is the same transform the IK solver targets, so the
-            # displayed position always matches the IK solution exactly.
-            tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
-            pos = tcp_pose[:3, 3].copy()
-
-            ratio = self.canvas.grid_units_per_cm
-            lx, ly, lz = pos[0] / ratio, pos[1] / ratio, pos[2] / ratio
-
-            # Keep the latest live point available globally even if the LP widgets
-            # are not present in the current UI layout.
+        if getattr(self, 'live_point_locked', False) and getattr(self, 'locked_live_point', None) is not None:
+            lx, ly, lz = self.locked_live_point
             self.current_live_point_cm = (lx, ly, lz)
+            pos = np.array([lx, ly, lz]) * ratio
+            locked = True
+        elif sim_panel and getattr(sim_panel, 'live_point_locked', False) and getattr(sim_panel, 'locked_live_point', None) is not None:
+            lx, ly, lz = sim_panel.locked_live_point
+            self.current_live_point_cm = (lx, ly, lz)
+            pos = np.array([lx, ly, lz]) * ratio
+            locked = True
 
-            live_x = getattr(self, "live_x", None)
-            live_y = getattr(self, "live_y", None)
-            live_z = getattr(self, "live_z", None)
-            if all(widget is not None for widget in (live_x, live_y, live_z)):
-                live_x.blockSignals(True)
-                live_y.blockSignals(True)
-                live_z.blockSignals(True)
+        if not locked:
+            # Keep the live-point marker dormant until the user explicitly finalizes
+            # the robot assembly with Make Robo. This prevents a default TCP/live point
+            # from appearing immediately on startup.
+            if not getattr(self, "robot_finalized", False):
+                self.current_live_point_cm = None
+                lx = ly = lz = 0.0
+                if hasattr(self.canvas, "clear_live_point_marker"):
+                    self.canvas.clear_live_point_marker()
+                if hasattr(self.canvas, "clear_live_tcp_marker"):
+                    self.canvas.clear_live_tcp_marker()
+                if hasattr(self.canvas, "update_hud_coords"):
+                    self.canvas.update_hud_coords(lx, ly, lz, status="PENDING", render=render)
+                return
 
-                live_x.setValue(lx)
-                live_y.setValue(ly)
-                live_z.setValue(lz)
+            if hasattr(self, "robot") and getattr(self.robot, "links", None):
+                if force_top_face and not self._tcp_link_uses_explicit_live_point(tcp_link):
+                    pos = self._compute_robot_top_face_center_point()
+                if pos is None:
+                    self._refresh_auto_tcp_offset(tcp_link)
+                    pos = self._get_live_point_world(tcp_link)
 
-                live_x.blockSignals(False)
-                live_y.blockSignals(False)
-                live_z.blockSignals(False)
+                if pos is None:
+                    self.current_live_point_cm = None
+                    lx = ly = lz = 0.0
+                    if hasattr(self.canvas, "clear_live_point_marker"):
+                        self.canvas.clear_live_point_marker()
+                    if hasattr(self.canvas, "clear_live_tcp_marker"):
+                        self.canvas.clear_live_tcp_marker()
+                    if hasattr(self.canvas, "update_hud_coords"):
+                        self.canvas.update_hud_coords(lx, ly, lz, status="PENDING", render=render)
+                    return
 
-            # Update 3D Engine HUD
-            if hasattr(self.canvas, 'update_hud_coords'):
-                self.canvas.update_hud_coords(lx, ly, lz, render=render)
-            if hasattr(self.canvas, 'update_live_point_marker'):
-                # Use the exact grid-unit position for marker alignment
-                self.canvas.update_live_point_marker(pos, render=render)
-
-            # Pick-and-Place Simulation Logic (MAGNET MODE)
-            # Uses mesh-based tool point for accurate contact geometry.
-            sim_tab = getattr(self, 'simulation_tab', None)
-            if sim_tab and hasattr(sim_tab, 'is_sim_active') and sim_tab.is_sim_active:
-                sim_pos, _, _ = self.get_link_tool_point(tcp_link)
-                self._handle_sim_pick_place(tcp_link, sim_pos, ratio)
+                lx, ly, lz = pos[0] / ratio, pos[1] / ratio, pos[2] / ratio
+                self.current_live_point_cm = (lx, ly, lz)
+                locked = False
+            else:
+                self.current_live_point_cm = None
+                lx = ly = lz = 0.0
+                if hasattr(self.canvas, "clear_live_point_marker"):
+                    self.canvas.clear_live_point_marker()
+                if hasattr(self.canvas, "clear_live_tcp_marker"):
+                    self.canvas.clear_live_tcp_marker()
+                if hasattr(self.canvas, "update_hud_coords"):
+                    self.canvas.update_hud_coords(lx, ly, lz, status="PENDING", render=render)
+                return
         else:
-            lx, ly, lz = 0.0, 0.0, 0.0
+            lx, ly, lz = pos[0] / ratio, pos[1] / ratio, pos[2] / ratio
             self.current_live_point_cm = (lx, ly, lz)
 
-            live_x = getattr(self, "live_x", None)
-            live_y = getattr(self, "live_y", None)
-            live_z = getattr(self, "live_z", None)
-            if all(widget is not None for widget in (live_x, live_y, live_z)):
-                live_x.blockSignals(True)
-                live_y.blockSignals(True)
-                live_z.blockSignals(True)
-                live_x.setValue(lx)
-                live_y.setValue(ly)
-                live_z.setValue(lz)
-                live_x.blockSignals(False)
-                live_y.blockSignals(False)
-                live_z.blockSignals(False)
+        live_x = getattr(self, "live_x", None)
+        live_y = getattr(self, "live_y", None)
+        live_z = getattr(self, "live_z", None)
+        if all(widget is not None for widget in (live_x, live_y, live_z)):
+            live_x.blockSignals(True)
+            live_y.blockSignals(True)
+            live_z.blockSignals(True)
 
-            if hasattr(self.canvas, 'update_hud_coords'):
-                self.canvas.update_hud_coords(lx, ly, lz, render=render)
-            if hasattr(self.canvas, 'clear_live_point_marker'):
-                self.canvas.clear_live_point_marker()
+            live_x.setValue(lx)
+            live_y.setValue(ly)
+            live_z.setValue(lz)
+
+            live_x.blockSignals(False)
+            live_y.blockSignals(False)
+            live_z.blockSignals(False)
+
+        # Update 3D Engine HUD
+        if hasattr(self.canvas, 'update_hud_coords'):
+            status = "🔒 LOCKED" if locked else "LIVE"
+            self.canvas.update_hud_coords(lx, ly, lz, status=status, render=render)
+        if hasattr(self.canvas, 'update_live_point_marker'):
+            # Use the exact grid-unit position for marker alignment
+            self.canvas.update_live_point_marker(pos, render=render)
+
+        # Drive the visible red TCP marker from the live coordinates every refresh.
+        if hasattr(self.canvas, 'update_live_tcp_marker'):
+            self.canvas.update_live_tcp_marker(pos)
+
+        # If we are not locked anymore, drop any stale fixed marker so only the live marker remains.
+        if not locked and hasattr(self.canvas, 'plotter'):
+            try:
+                if "fixed_live_point_marker" in self.canvas.plotter.renderer.actors:
+                    self.canvas.plotter.remove_actor("fixed_live_point_marker")
+                    if render:
+                        self.canvas.plotter.render()
+            except Exception:
+                pass
+
+        # Pick-and-Place Simulation Logic (MAGNET MODE)
+        # Uses mesh-based tool point for accurate contact geometry.
+        sim_tab = getattr(self, 'simulation_tab', None)
+        if (
+            sim_tab
+            and hasattr(sim_tab, 'is_sim_active')
+            and sim_tab.is_sim_active
+            and getattr(sim_tab, "active_operation", None) is None
+            and tcp_link is not None
+        ):
+            sim_pos, _, _ = self.get_link_tool_point(tcp_link)
+            self._handle_sim_pick_place(tcp_link, sim_pos, ratio)
 
     # ─── Simulation Object Helpers (ported from Torotron) ─────────────
 
@@ -422,258 +458,456 @@ class NavigationMixin:
         _, _, gap = self.get_link_tool_point(tcp_link)
         return gap
 
-    def _control_gripper_fingers(self, close=True, target_gap_world=None, apply=True):
-        """
-        Moves gripper master joints to open/close the fingers.
-        """
-        master_joints = [
-            j for j_name, j in self.robot.joints.items()
-            if j_name in self.robot.joint_relations
+    def _saved_gripper_definition(self):
+        """Return the active saved Gripper Tool definition."""
+        payload = getattr(self, "gripper_tool_config", None)
+        if not isinstance(payload, dict):
+            payload = getattr(self, "end_effector_tool_config", None)
+        if not isinstance(payload, dict):
+            return {}
+        definition = payload.get("EndEffector", payload)
+        if not isinstance(definition, dict):
+            return {}
+        if str(definition.get("ToolType", "")).strip().lower() != "gripper tool":
+            return {}
+        return definition
+
+    def _configured_gripper_joint_names(self):
+        """Resolve saved jaw joints, including independent joints without relations."""
+        definition = self._saved_gripper_definition()
+        names = [
+            str(jaw.get("JointID"))
+            for jaw in definition.get("Jaws", [])
+            if isinstance(jaw, dict) and jaw.get("JointID")
+        ]
+        names.extend(getattr(self, "active_gripper_joint_names", []) or [])
+        names.extend(
+            name for name, joint in self.robot.joints.items()
+            if getattr(joint, "is_gripper", False)
+        )
+
+        unique = []
+        seen = set()
+        for name in names:
+            if name in seen or name not in self.robot.joints:
+                continue
+            unique.append(name)
+            seen.add(name)
+        return unique
+
+    def _saved_gripper_jaw_map(self):
+        """Return saved jaw settings keyed by joint ID."""
+        definition = self._saved_gripper_definition()
+        return {
+            str(jaw.get("JointID")): jaw
+            for jaw in definition.get("Jaws", [])
+            if isinstance(jaw, dict) and jaw.get("JointID")
+        }
+
+    def ensure_saved_gripper_tcp(self):
+        """Restore the saved gripper TCP using the centroid of all saved jaws."""
+        definition = self._saved_gripper_definition()
+        jaw_map = self._saved_gripper_jaw_map()
+        anchors = []
+        face_centers = []
+        for joint_name in self._configured_gripper_joint_names():
+            joint = self.robot.joints.get(joint_name)
+            jaw = jaw_map.get(joint_name, {})
+            local_center = jaw.get("FaceCenterLocal")
+            if joint is None or joint.child_link is None or local_center is None:
+                continue
+            try:
+                local_center = np.asarray(local_center, dtype=float).reshape(3)
+            except Exception:
+                continue
+            face_centers.append(
+                (np.asarray(joint.child_link.t_world, dtype=float) @ np.append(local_center, 1.0))[:3]
+            )
+            anchor = joint.parent_link
+            if hasattr(self, "_resolve_rigid_tcp_link"):
+                anchor = self._resolve_rigid_tcp_link(joint.child_link) or anchor
+            if anchor is not None and anchor not in anchors:
+                anchors.append(anchor)
+
+        if anchors and len(face_centers) >= 2:
+            tcp_link = max(anchors, key=lambda link: len(self.robot.get_kinematic_chain(link)))
+            midpoint_world = np.mean(np.asarray(face_centers, dtype=float), axis=0)
+            midpoint_local = (
+                np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+                @ np.append(midpoint_world, 1.0)
+            )[:3]
+            self.robot.set_tcp_transform(tcp_link.name, position=midpoint_local)
+            self.robot.ensure_tcp_transform(tcp_link)
+            self.custom_tcp_name = tcp_link.name
+            return tcp_link
+
+        alignment_face = definition.get("BaseAlignmentFace")
+        if isinstance(alignment_face, dict):
+            tcp_name = alignment_face.get("TCPLink") or definition.get("TCPLink")
+            tcp_link = self.robot.links.get(tcp_name)
+            link_local_center = alignment_face.get("FaceCenterLinkLocal")
+            if tcp_link is not None and link_local_center is not None:
+                try:
+                    link_local_center = np.asarray(
+                        link_local_center, dtype=float
+                    ).reshape(3)
+                except (TypeError, ValueError):
+                    link_local_center = None
+                if link_local_center is not None:
+                    self.robot.set_tcp_transform(
+                        tcp_link.name, position=link_local_center
+                    )
+                    self.robot.ensure_tcp_transform(tcp_link)
+                    self.custom_tcp_name = tcp_link.name
+                    return tcp_link
+
+        return None
+
+    def _gripper_control_joint_names(self):
+        """Return independent gripper controls while avoiding duplicate relation slaves."""
+        configured = self._configured_gripper_joint_names()
+        configured_set = set(configured)
+        slave_master = {}
+        for master_name, slaves in self.robot.joint_relations.items():
+            for slave_name, _ in slaves:
+                slave_master[slave_name] = master_name
+        return [
+            name for name in configured
+            if slave_master.get(name) not in configured_set
         ]
 
-        if not master_joints:
-            return {} if not apply else None
+    def _apply_gripper_control_value(self, joint_name, value):
+        """Rotate a selected jaw joint and every relation-linked jaw."""
+        joint = self.robot.joints.get(joint_name)
+        if joint is None:
+            return
+        joint.current_value = float(np.clip(value, joint.min_limit, joint.max_limit))
+        for slave_name, ratio in self.robot.joint_relations.get(joint_name, []):
+            slave = self.robot.joints.get(slave_name)
+            if slave is None:
+                continue
+            slave_value = joint.current_value * float(ratio)
+            slave.current_value = float(np.clip(slave_value, slave.min_limit, slave.max_limit))
 
+    def _apply_gripper_target_values(self, targets):
+        """Apply a complete jaw target map without relation members overwriting each other."""
+        clean_targets = {
+            name: float(value)
+            for name, value in (targets or {}).items()
+            if name in self.robot.joints
+        }
+        explicit_names = set(clean_targets)
+
+        # Every explicitly configured jaw owns its calculated angle. This is
+        # essential for mirrored master/slave jaws with different endpoints.
+        for joint_name, value in clean_targets.items():
+            joint = self.robot.joints[joint_name]
+            joint.current_value = float(np.clip(value, joint.min_limit, joint.max_limit))
+
+        # Preserve legacy relation-only grippers: propagate to slaves only when
+        # the slave does not already have an explicit per-jaw target.
+        for master_name, value in clean_targets.items():
+            for slave_name, ratio in self.robot.joint_relations.get(master_name, []):
+                if slave_name in explicit_names:
+                    continue
+                slave = self.robot.joints.get(slave_name)
+                if slave is None:
+                    continue
+                slave_value = value * float(ratio)
+                slave.current_value = float(np.clip(slave_value, slave.min_limit, slave.max_limit))
+
+    def _saved_gripper_angle_bounds(self, joint_name, jaw_map, definition):
+        """Resolve closed/open bounds, repairing old zero-span relation slaves."""
+        joint = self.robot.joints[joint_name]
+        jaw = jaw_map.get(joint_name, {})
+        closed = jaw.get("ClosedAngle", definition.get("MinOpening", joint.min_limit))
+        opened = jaw.get("OpenAngle", definition.get("MaxOpening", joint.max_limit))
+        if closed is None:
+            closed = joint.min_limit
+        if opened is None:
+            opened = joint.max_limit
+        closed = float(np.clip(float(closed), joint.min_limit, joint.max_limit))
+        opened = float(np.clip(float(opened), joint.min_limit, joint.max_limit))
+
+        if abs(opened - closed) < 1e-9:
+            for master_name, slaves in self.robot.joint_relations.items():
+                relation = next(
+                    ((slave_name, float(ratio)) for slave_name, ratio in slaves if slave_name == joint_name),
+                    None,
+                )
+                if relation is None or master_name not in self.robot.joints:
+                    continue
+                ratio = relation[1]
+                master = self.robot.joints[master_name]
+                master_jaw = jaw_map.get(master_name, {})
+                master_closed = master_jaw.get("ClosedAngle", definition.get("MinOpening", master.min_limit))
+                master_opened = master_jaw.get("OpenAngle", definition.get("MaxOpening", master.max_limit))
+                if master_closed is None or master_opened is None:
+                    continue
+                repaired_closed = float(np.clip(float(master_closed) * ratio, joint.min_limit, joint.max_limit))
+                repaired_opened = float(np.clip(float(master_opened) * ratio, joint.min_limit, joint.max_limit))
+                if abs(repaired_opened - repaired_closed) > 1e-9:
+                    closed, opened = repaired_closed, repaired_opened
+                    break
+        return closed, opened
+
+    def set_gripper_opening_percent(self, percent, apply=True):
+        """Set all gripper jaws with one normalized opening command."""
+        definition = self._saved_gripper_definition()
+        jaw_map = self._saved_gripper_jaw_map()
+        configured_names = self._configured_gripper_joint_names()
+        has_saved_endpoints = any(
+            "ClosedAngle" in jaw or "OpenAngle" in jaw
+            for jaw in jaw_map.values()
+        )
+        explicit_names = [
+            name for name in configured_names
+            if has_saved_endpoints and name in jaw_map
+        ]
+        control_names = explicit_names or self._gripper_control_joint_names()
+        if not control_names:
+            return {}
+
+        fraction = float(np.clip(percent, 0.0, 100.0)) / 100.0
         targets = {}
-
-        # Case A: Precise gap targeting via bisection
-        if target_gap_world is not None:
-            saved = {j.name: j.current_value for j in master_joints}
-
-            for joint in master_joints:
-                lo, hi = joint.min_limit, joint.max_limit
-                best_mid = joint.current_value
-
-                for _ in range(20):
-                    mid = (lo + hi) / 2.0
-                    joint.current_value = mid
-                    for s_id, r in self.robot.joint_relations[joint.name]:
-                        if s_id in self.robot.joints:
-                            self.robot.joints[s_id].current_value = mid * r
-                    self.robot.update_kinematics()
-
-                    gap_now = self._compute_finger_gap()
-                    if gap_now is None:
-                        break
-                    if gap_now > target_gap_world:
-                        lo = mid
-                    else:
-                        hi = mid
-                    best_mid = mid
-
-                targets[joint.name] = best_mid
-
-            for j in master_joints:
-                j.current_value = saved[j.name]
-                for s_id, r in self.robot.joint_relations[j.name]:
-                    if s_id in self.robot.joints:
-                        self.robot.joints[s_id].current_value = saved[j.name] * r
-            self.robot.update_kinematics()
-
-            if apply:
-                for j_name, val in targets.items():
-                    self.robot.joints[j_name].current_value = val
-                    for s_id, r in self.robot.joint_relations[j_name]:
-                        if s_id in self.robot.joints:
-                            self.robot.joints[s_id].current_value = val * r
-                self.robot.update_kinematics()
-                self.canvas.update_transforms(self.robot)
-                return None
-            return targets
-
-        # Case B: Full open / close
-        for joint in master_joints:
-            target = joint.max_limit if close else joint.min_limit
-            targets[joint.name] = target
-            if apply:
-                joint.current_value = target
-                for s_id, r in self.robot.joint_relations[joint.name]:
-                    if s_id in self.robot.joints:
-                        self.robot.joints[s_id].current_value = target * r
+        for joint_name in control_names:
+            joint = self.robot.joints.get(joint_name)
+            if joint is None:
+                continue
+            closed, opened = self._saved_gripper_angle_bounds(joint_name, jaw_map, definition)
+            target = closed + fraction * (opened - closed)
+            targets[joint_name] = float(target)
 
         if apply:
+            self._apply_gripper_target_values(targets)
             self.robot.update_kinematics()
             self.canvas.update_transforms(self.robot)
-            return None
         return targets
+
+    def get_gripper_opening_percent(self):
+        """Estimate the current shared slider percentage from all saved jaws."""
+        jaw_map = self._saved_gripper_jaw_map()
+        definition = self._saved_gripper_definition()
+        percentages = []
+        for joint_name in self._configured_gripper_joint_names():
+            joint = self.robot.joints.get(joint_name)
+            if joint is None:
+                continue
+            closed, opened = self._saved_gripper_angle_bounds(joint_name, jaw_map, definition)
+            span = float(opened) - float(closed)
+            if abs(span) < 1e-9:
+                continue
+            percentages.append((float(joint.current_value) - float(closed)) / span * 100.0)
+        if not percentages:
+            return 0.0
+        return float(np.clip(np.mean(percentages), 0.0, 100.0))
+
+    def _control_gripper_fingers(self, close=True, target_gap_world=None, apply=True):
+        """
+        Move every saved gripper jaw joint so its child object opens or closes.
+
+        MinOpening is the closed position and MaxOpening is the open position.
+        Relation-linked jaws are driven by their master; independent selected
+        jaws are controlled directly.
+        """
+        targets = self.set_gripper_opening_percent(0.0 if close else 100.0, apply=apply)
+        return None if apply else targets
 
     # ─── End Simulation Helpers ───────────────────────────────────────
 
     def get_link_tool_point(self, link, return_vec=False):
-        """
-        Calculates the Tool Center Point (TCP) in World and Local coords.
-        """
+        """Return the current TCP world position and local offset for the given link."""
         if not link:
-            if return_vec: return np.zeros(3), np.zeros(3), None
+            if return_vec:
+                return np.zeros(3), np.zeros(3), None
             return np.zeros(3), np.zeros(3), 0.0
 
-        def mesh_vertices_world(mesh_link):
-            if mesh_link is None or mesh_link.mesh is None:
-                return None
-            verts = np.array(getattr(mesh_link.mesh, "vertices", []), dtype=float)
-            if verts.size == 0:
-                return None
-            verts = verts.reshape((-1, 3))
-            verts_h = np.hstack([verts, np.ones((len(verts), 1))])
-            return (np.array(mesh_link.t_world, dtype=float) @ verts_h.T).T[:, :3]
+        if hasattr(self, "robot") and getattr(self.robot, "get_tcp_world_pose", None) is not None:
+            try:
+                link_name = getattr(link, "name", None)
+                if link_name in self.robot.links:
+                    tcp_pose = self.robot.get_tcp_world_pose(link)
+                    local_tcp = self.robot.get_tcp_local_transform(link)[:3, 3]
+                    if return_vec:
+                        return tcp_pose[:3, 3].copy(), local_tcp.copy(), None
+                    return tcp_pose[:3, 3].copy(), local_tcp.copy(), 0.0
+            except Exception:
+                pass
 
-        def distal_point(mesh_link, origin_world):
-            world_pts = mesh_vertices_world(mesh_link)
-            if world_pts is None:
-                return None
-            distances = np.linalg.norm(world_pts - origin_world, axis=1)
-            if distances.size == 0:
-                return None
-            max_dist = float(np.max(distances))
-            tolerance = max(max_dist * 0.01, 1e-6)
-            tip_pts = world_pts[distances >= (max_dist - tolerance)]
-            if tip_pts.size == 0:
-                tip_pts = world_pts[[int(np.argmax(distances))]]
-            return np.mean(tip_pts, axis=0)
+        return np.zeros(3), np.zeros(3), None if return_vec else 0.0
 
-        def upper_contact_point(mesh_link):
-            world_pts = mesh_vertices_world(mesh_link)
-            if world_pts is None:
-                return None
-            max_z = float(np.max(world_pts[:, 2]))
-            tolerance = max(np.ptp(world_pts[:, 2]) * 0.01, 1e-6)
-            upper_pts = world_pts[world_pts[:, 2] >= (max_z - tolerance)]
-            if upper_pts.size == 0:
-                upper_pts = world_pts[[int(np.argmax(world_pts[:, 2]))]]
-            return np.mean(upper_pts, axis=0)
+    def _get_live_point_world(self, tcp_link):
+        """Return the current live point in this robot pose in world coordinates."""
+        if tcp_link is not None and hasattr(self, 'get_link_tool_point'):
+            try:
+                candidate, _, _ = self.get_link_tool_point(tcp_link)
+                candidate = np.asarray(candidate, dtype=float).reshape(3)
+                if np.linalg.norm(candidate) > 1e-9 and self._tcp_link_uses_explicit_live_point(tcp_link):
+                    return candidate
+            except Exception:
+                pass
 
-        def remember_auto_tcp(local_tool_point):
-            if getattr(link, "custom_tcp_offset", None) is None:
-                link.auto_tcp_offset = np.array(local_tool_point, dtype=float)
+        if self._tcp_link_uses_explicit_live_point(tcp_link):
+            try:
+                tcp_pose = self.robot.get_tcp_world_pose(tcp_link)
+                return tcp_pose[:3, 3].copy()
+            except Exception:
+                pass
 
-        # 1. Identify 'Fingers'
-        fingers = []
-        for joint in link.child_joints:
-            if getattr(joint, 'is_gripper', False) and joint.child_link:
-                fingers.append(joint.child_link)
+        top_point = self._compute_robot_top_face_center_point()
+        if top_point is not None:
+            return top_point
 
-        # Priority 1: User-Defined Custom TCP
-        if hasattr(self, "robot") and link.name in self.robot.links:
-            tcp_local_tf = self.robot.get_tcp_local_transform(link)
-        else:
-            tcp_local_tf = np.eye(4)
+        return np.zeros(3, dtype=float)
 
-        if hasattr(link, 'custom_tcp_offset') and link.custom_tcp_offset is not None:
-            local_tool_point = tcp_local_tf[:3, 3]
-            world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
-            gap = 0.0
-            if fingers:
-                pts_world = []
-                for f in fingers:
-                    if f.mesh:
-                        b = f.mesh.bounds
-                        c_finger = (b[0] + b[1]) / 2.0
-                        pts_world.append((f.t_world @ np.append(c_finger, 1.0))[:3])
-                if len(pts_world) >= 2:
-                    for i in range(len(pts_world)):
-                        for j in range(i + 1, len(pts_world)):
-                            gap = max(gap, np.linalg.norm(pts_world[i] - pts_world[j]))
-            if return_vec:
-                return world_tool_point, local_tool_point, None
-            return world_tool_point, local_tool_point, gap
+    def _tcp_link_uses_explicit_live_point(self, tcp_link):
+        """Return True if the selected TCP link is intended to define the robot live point."""
+        if tcp_link is None:
+            return False
+        if getattr(tcp_link, 'custom_tcp_offset', None) is not None:
+            return True
+        if getattr(self, 'custom_tcp_name', None) == getattr(tcp_link, 'name', None):
+            return True
+        return False
 
-        # 2. Case: Multiple Fingers (upper exposed contact point)
-        if len(fingers) >= 2:
-            pts_world = []
-            pts_local = []
-            hand_origin = np.array(link.t_world[:3, 3], dtype=float)
-            for f in fingers:
-                w_pt = upper_contact_point(f)
-                if w_pt is None:
-                    w_pt = distal_point(f, hand_origin)
-                if w_pt is None:
-                    continue
-                pts_world.append(w_pt)
-                inv_hand = np.linalg.inv(link.t_world)
-                pt_in_hand = (inv_hand @ np.append(w_pt, 1.0))[:3]
-                pts_local.append(pt_in_hand)
-            if pts_local:
-                pts_local_np = np.array(pts_local, dtype=float)
-                upper_z = np.max(pts_local_np[:, 2])
-                upper_local_pts = pts_local_np[pts_local_np[:, 2] >= (upper_z - 1e-6)]
-                local_tool_point = np.mean(upper_local_pts, axis=0)
-                world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
-                remember_auto_tcp(local_tool_point)
-                max_span = 0.0
-                best_vec = np.array([1.0, 0.0, 0.0])
-                for i in range(len(pts_world)):
-                    for j in range(i + 1, len(pts_world)):
-                        v = pts_world[i] - pts_world[j]
-                        d = np.linalg.norm(v)
-                        if d > max_span:
-                            max_span = d
-                            best_vec = v
-                real_gap = max_span
-                finger_depth = 0.0
-                all_local = []
-                inv_hand = np.linalg.inv(link.t_world)
-                for f in fingers:
-                    f_world = mesh_vertices_world(f)
-                    if f_world is not None:
-                        f_local = (inv_hand @ np.hstack([f_world, np.ones((len(f_world), 1))]).T).T[:, :3]
-                        all_local.append(f_local)
-                if all_local:
-                    all_local = np.vstack(all_local)
-                    finger_depth = float(np.ptp(all_local[:, 2]))
-                geo = {
-                    "real_gap": real_gap,
-                    "finger_depth": finger_depth,
-                    "fingers_world": pts_world,
-                    "primary_axis": best_vec,
-                    "contact_mode": "upper",
-                }
-                if return_vec:
-                    return world_tool_point, local_tool_point, geo
-                return world_tool_point, local_tool_point, real_gap
-
-        # 3. Fallback: Standard leaf or mesh-top point
-        if not link.mesh:
-            res = (link.t_world[:3, 3], np.zeros(3), None)
-            return res if return_vec else (res[0], res[1], 0.0)
-
-        parent_link = getattr(getattr(link, "parent_joint", None), "parent_link", None)
-        origin_world = (
-            np.array(parent_link.t_world[:3, 3], dtype=float)
-            if parent_link is not None
-            else np.zeros(3, dtype=float)
-        )
-        world_tip = upper_contact_point(link)
-        if world_tip is None:
-            world_tip = distal_point(link, origin_world)
-        if world_tip is not None:
-            inv_link = np.linalg.inv(link.t_world)
-            local_tool_point = (inv_link @ np.append(world_tip, 1.0))[:3]
-        else:
-            bounds = link.mesh.bounds
-            center_x = (bounds[0] + bounds[1]) / 2.0
-            center_y = (bounds[2] + bounds[3]) / 2.0
-            top_z = bounds[5]
-            local_tool_point = np.array([center_x, center_y, top_z])
-        world_tool_point = (link.t_world @ np.append(local_tool_point, 1.0))[:3]
-        remember_auto_tcp(local_tool_point)
-        if return_vec:
-            return world_tool_point, local_tool_point, {"contact_mode": "upper"}
-        return world_tool_point, local_tool_point, None
-
-    def _refresh_auto_tcp_offset(self, tcp_link):
-        """Update an automatic TCP offset from current world gripper geometry."""
-        if tcp_link is None or getattr(tcp_link, "custom_tcp_offset", None) is not None:
-            return
+    def _get_mesh_face_centers(self, mesh):
+        """Return an ndarray of face center points for a supported mesh object."""
         try:
-            before = None
-            if getattr(tcp_link, "auto_tcp_offset", None) is not None:
-                before = np.array(tcp_link.auto_tcp_offset, dtype=float).copy()
-            self.get_link_tool_point(tcp_link)
-            after = getattr(tcp_link, "auto_tcp_offset", None)
-            if before is not None and after is not None and np.allclose(before, after, atol=1e-6):
-                return
+            import trimesh
+            if isinstance(mesh, trimesh.Trimesh):
+                if hasattr(mesh, 'triangles_center'):
+                    return np.asarray(mesh.triangles_center, dtype=float)
+                if hasattr(mesh, 'faces') and hasattr(mesh, 'vertices'):
+                    faces = np.asarray(mesh.faces, dtype=int)
+                    verts = np.asarray(mesh.vertices, dtype=float)
+                    if faces.ndim == 2 and faces.shape[1] >= 3:
+                        return np.mean(verts[faces[:, :3]], axis=1)
         except Exception:
             pass
+
+        try:
+            import pyvista as pv
+            if hasattr(mesh, 'cell_centers'):
+                centers = mesh.cell_centers().points
+                if centers is not None and len(centers):
+                    return np.asarray(centers, dtype=float)
+        except Exception:
+            pass
+
+        if hasattr(mesh, 'faces') and hasattr(mesh, 'vertices'):
+            faces = np.asarray(mesh.faces)
+            verts = np.asarray(mesh.vertices, dtype=float)
+            if faces.ndim == 2 and faces.shape[1] >= 3:
+                return np.mean(verts[faces[:, :3]], axis=1)
+            if faces.ndim == 1 and faces.size > 0:
+                # Support flat pyvista face arrays: [n, i0, i1, i2, n, j0, j1, j2, ...]
+                face_centers = []
+                idx = 0
+                while idx < faces.size:
+                    count = int(faces[idx])
+                    if count < 3 or idx + count >= faces.size:
+                        break
+                    indices = faces[idx + 1: idx + 1 + count]
+                    face_centers.append(np.mean(verts[indices[:3]], axis=0))
+                    idx += count + 1
+                if face_centers:
+                    return np.asarray(face_centers, dtype=float)
+
+        return None
+
+    def _compute_robot_top_face_center_point(self):
+        """Compute the topmost face center for the assembled robot in world coordinates."""
+        if not hasattr(self, "robot") or not getattr(self.robot, "links", None):
+            return None
+
+        top_centers = []
+        top_z = -np.inf
+        for link in self.robot.links.values():
+            mesh = getattr(link, 'mesh', None)
+            if mesh is None:
+                continue
+
+            transform = np.asarray(getattr(link, 't_world', np.eye(4)), dtype=float)
+            if transform.shape != (4, 4):
+                continue
+
+            centers = self._get_mesh_face_centers(mesh)
+            if centers is None or len(centers) == 0:
+                continue
+
+            homogeneous = np.hstack((centers, np.ones((len(centers), 1), dtype=float)))
+            world_centers = (transform @ homogeneous.T).T[:, :3]
+            if world_centers.size == 0:
+                continue
+
+            link_top_z = np.max(world_centers[:, 2])
+            if link_top_z > top_z + 1e-9:
+                top_z = link_top_z
+                top_centers = [world_centers[world_centers[:, 2] >= link_top_z - 1e-6]]
+            elif abs(link_top_z - top_z) <= 1e-6:
+                top_centers.append(world_centers[world_centers[:, 2] >= top_z - 1e-6])
+
+        if not top_centers:
+            return None
+
+        top_centers = np.vstack(top_centers)
+        return np.mean(top_centers, axis=0)
+
+    def _compute_robot_top_face_center_point_data(self):
+        """Return the topmost face center point, its link name, and local link coordinates."""
+        if not hasattr(self, "robot") or not getattr(self.robot, "links", None):
+            return None
+
+        top_z = -np.inf
+        best_link = None
+        best_centers = None
+
+        for link in self.robot.links.values():
+            mesh = getattr(link, 'mesh', None)
+            if mesh is None:
+                continue
+
+            transform = np.asarray(getattr(link, 't_world', np.eye(4)), dtype=float)
+            if transform.shape != (4, 4):
+                continue
+
+            centers = self._get_mesh_face_centers(mesh)
+            if centers is None or len(centers) == 0:
+                continue
+
+            homogeneous = np.hstack((centers, np.ones((len(centers), 1), dtype=float)))
+            world_centers = (transform @ homogeneous.T).T[:, :3]
+            if world_centers.size == 0:
+                continue
+
+            link_top_z = np.max(world_centers[:, 2])
+            if link_top_z > top_z + 1e-9:
+                top_z = link_top_z
+                best_link = link
+                best_centers = world_centers[world_centers[:, 2] >= link_top_z - 1e-6]
+            elif abs(link_top_z - top_z) <= 1e-6 and best_centers is not None:
+                extra = world_centers[world_centers[:, 2] >= top_z - 1e-6]
+                if extra.size:
+                    best_centers = np.vstack((best_centers, extra))
+
+        if best_link is None or best_centers is None or len(best_centers) == 0:
+            return None
+
+        top_point = np.mean(best_centers, axis=0)
+        inv_transform = np.linalg.inv(np.asarray(getattr(best_link, 't_world', np.eye(4)), dtype=float))
+        local = (inv_transform @ np.append(top_point, 1.0))[:3]
+        return top_point, best_link.name, local
+
+    def _refresh_auto_tcp_offset(self, tcp_link):
+        """Keep the TCP offset as a fixed local point on the selected link."""
+        if tcp_link is None:
+            return
+        if getattr(tcp_link, "custom_tcp_offset", None) is not None:
+            if getattr(tcp_link, "auto_tcp_offset", None) is None:
+                tcp_link.auto_tcp_offset = np.array(tcp_link.custom_tcp_offset, dtype=float).copy()
+            return
+        if getattr(tcp_link, "auto_tcp_offset", None) is None:
+            tcp_link.auto_tcp_offset = np.zeros(3, dtype=float)
 
     def show_speed_overlay(self):
         """Displays current speed percentage on the 3D canvas temporarily"""
@@ -684,8 +918,6 @@ class NavigationMixin:
     def on_tab_changed(self, index):
         is_links = index == self.panel_stack.indexOf(self.links_tab)
         self.canvas.enable_drag = is_links
-        if hasattr(self, 'gripper_surface_btn'):
-            self.gripper_surface_btn.setVisible(index == self.panel_stack.indexOf(self.joint_tab))
         widget = self.panel_stack.widget(index)
         if not widget: return
         if hasattr(self, 'gripper_tab') and widget == self.gripper_tab:
@@ -938,4 +1170,5 @@ class NavigationMixin:
             QSplitter::handle { background-color: #bbb; }
             QSplitter::handle:hover { background-color: #1976d2; }
         """)
+
 

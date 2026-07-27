@@ -3,6 +3,7 @@ from PyQt5 import QtWidgets, QtCore
 from ui.panels.matrices_panel import MatricesPanel
 from ui.panels.ik_fk_panel import IKFKPanel
 from ui.panels.result_panel import ResultPanel
+from ui.panels.object_panel import ObjectPanel
 from ui.panels.program_panel import ProgramPanel
 
 class ExperimentPanel(QtWidgets.QWidget):
@@ -47,31 +48,48 @@ class ExperimentPanel(QtWidgets.QWidget):
         self.matrices_tab = MatricesPanel(self.mw)
         self.ik_fk_tab = IKFKPanel(self.mw)
         self.result_tab = ResultPanel(self.mw)
+        self.object_tab = ObjectPanel(self.mw)
         self.program_tab = ProgramPanel(self.mw)
 
         self.tabs.addTab(self.matrices_tab, "Matrices")
         self.tabs.addTab(self.ik_fk_tab, "IK and FK")
         self.tabs.addTab(self.result_tab, "Result")
+        self.tabs.addTab(self.object_tab, "Object")
         self.tabs.addTab(self.program_tab, "Code")
 
         layout.addWidget(self.tabs)
 
         self.tabs.currentChanged.connect(self.on_tab_changed)
 
+    def _safe_call(self, panel, method_name, *args):
+        method = getattr(panel, method_name, None)
+        if method is None:
+            return None
+        try:
+            return method(*args)
+        except Exception as exc:
+            panel_name = panel.__class__.__name__
+            if hasattr(self.mw, "log"):
+                self.mw.log(f"Experiment panel warning: {panel_name}.{method_name} failed: {exc}")
+            return None
+
     def on_tab_changed(self, index):
         widget = self.tabs.widget(index)
-        if hasattr(widget, "update_display"):
-            widget.update_display()
+        self._safe_call(widget, "update_display")
 
     def refresh_sliders(self):
-        self.matrices_tab.refresh_sliders()
-        self.ik_fk_tab.refresh_sliders()
-        self.ik_fk_tab.rebuild_dh_table()
+        self._safe_call(self.matrices_tab, "refresh_sliders")
+        self._safe_call(self.ik_fk_tab, "refresh_sliders")
+        self._safe_call(self.ik_fk_tab, "rebuild_dh_table")
+        self._safe_call(self.result_tab, "update_display")
+        self._safe_call(self.object_tab, "refresh_sliders")
 
     def update_display(self):
-        self.matrices_tab.update_display()
-        self.ik_fk_tab.update_display()
+        self._safe_call(self.matrices_tab, "update_display")
+        self._safe_call(self.ik_fk_tab, "update_display")
+        self._safe_call(self.result_tab, "update_display")
+        self._safe_call(self.object_tab, "update_display")
 
     def sync_slider(self, child_name, value):
-        self.matrices_tab.sync_slider(child_name, value)
-        self.ik_fk_tab.sync_slider(child_name, value)
+        self._safe_call(self.matrices_tab, "sync_slider", child_name, value)
+        self._safe_call(self.ik_fk_tab, "sync_slider", child_name, value)

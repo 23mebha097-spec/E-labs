@@ -1,6 +1,53 @@
 from PyQt5 import QtWidgets, QtCore, QtGui
 import numpy as np
 
+
+def build_alignment_transform(parent_center, parent_normal, child_center, child_normal, flip=False):
+    """Build the rigid transform that snaps a child component onto a parent face."""
+    p_center = np.asarray(parent_center, dtype=float)
+    p_normal = np.asarray(parent_normal, dtype=float)
+    c_center = np.asarray(child_center, dtype=float)
+    c_normal = np.asarray(child_normal, dtype=float)
+
+    if np.linalg.norm(p_normal) < 1e-9 or np.linalg.norm(c_normal) < 1e-9:
+        raise ValueError("Parent and child normals must be non-zero.")
+
+    target_normal = -p_normal if not flip else p_normal
+    rotation_mat = get_rotation_between_vectors(c_normal, target_normal)
+
+    r_mat = np.eye(4)
+    r_mat[:3, :3] = rotation_mat
+    t_to_origin = np.eye(4)
+    t_to_origin[:3, 3] = -c_center
+    t_back = np.eye(4)
+    t_back[:3, 3] = p_center
+
+    return t_back @ r_mat @ t_to_origin
+
+
+def get_rotation_between_vectors(v_from, v_to):
+    v_from = np.asarray(v_from, dtype=float)
+    v_to = np.asarray(v_to, dtype=float)
+
+    v_from = v_from / np.linalg.norm(v_from)
+    v_to = v_to / np.linalg.norm(v_to)
+
+    v = np.cross(v_from, v_to)
+    c = np.dot(v_from, v_to)
+    s = np.linalg.norm(v)
+
+    if s < 1e-6:
+        if c > 0:
+            return np.eye(3)
+        ortho = np.array([1, 0, 0]) if abs(v_from[0]) < 0.9 else np.array([0, 1, 0])
+        axis = np.cross(v_from, ortho)
+        axis /= np.linalg.norm(axis)
+        return 2 * np.outer(axis, axis) - np.eye(3)
+
+    v_skew = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
+    return np.eye(3) + v_skew + (v_skew @ v_skew) * ((1 - c) / (s**2))
+
+
 class TypeOnlyDoubleSpinBox(QtWidgets.QDoubleSpinBox):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -28,6 +75,15 @@ class AlignPanel(QtWidgets.QWidget):
         header.setFont(QtGui.QFont("Segoe UI", 14, QtGui.QFont.Bold))
         header.setStyleSheet("color: #1976d2; margin-bottom: 6px;")
         layout.addWidget(header)
+
+        self.info_label = QtWidgets.QLabel(
+            "Pick a parent face and a child face to align a component against the assembly."
+        )
+        self.info_label.setWordWrap(True)
+        self.info_label.setStyleSheet("font-size: 12px; color: #546e7a; margin-bottom: 4px;")
+        layout.addWidget(self.info_label)
+
+        layout.addSpacing(6)
 
         # 2. Parent Picking
         step1_lbl = QtWidgets.QLabel("Step 1: Pick Parent Face")
@@ -58,6 +114,14 @@ class AlignPanel(QtWidgets.QWidget):
         self.child_label = QtWidgets.QLabel("Child: None selected")
         self.child_label.setStyleSheet("font-size: 13px; color: #757575; padding: 2px 4px;")
         layout.addWidget(self.child_label)
+
+        layout.addSpacing(8)
+
+        self.clear_btn = QtWidgets.QPushButton("Clear Selections")
+        self.clear_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.clear_btn.setStyleSheet("font-size: 13px; padding: 8px;")
+        self.clear_btn.clicked.connect(self.reset_panel)
+        layout.addWidget(self.clear_btn)
 
         layout.addSpacing(8)
         
@@ -244,11 +308,21 @@ class AlignPanel(QtWidgets.QWidget):
         self.child_pick_data = None
         self.parent_label.setText("Parent: None selected")
         self.child_label.setText("Child: None selected")
+        self.info_label.setText("Selections cleared. Pick a parent face and a child face to continue aligning.")
         # Block signals to avoid triggering apply_alignment during reset
         self.flip_check.blockSignals(True)
         self.flip_check.setChecked(False)
         self.flip_check.blockSignals(False)
         for s in self.spins.values(): s.setValue(0)
+        self.temp_offset = np.eye(4)
+        self.alignment_point = None
+        self.alignment_normal = None
+        self.original_child_transform = None
+        self.undo_stack.clear()
+        self.redo_stack.clear()
+        self.mw.canvas.clear_highlights()
+        self.mw.robot.update_kinematics()
+        self.mw.canvas.update_transforms(self.mw.robot)
         self.mw.log("Align Panel Reset.")
 
     def undo_action(self):
@@ -344,22 +418,13 @@ class AlignPanel(QtWidgets.QWidget):
         c_center = self.child_pick_data['center']
         c_normal = self.child_pick_data['normal']
 
-        # 1. ROTATION: Align Child Normal to Parent Normal
-        # Default: faces look at each other (Nc points into Np, so Nc = -Np)
-        target_normal = -p_normal
-        if self.flip_check.isChecked():
-            target_normal = p_normal # Face same way (stacking)
-
-        # Calculate rotation matrix from c_normal to target_normal
-        rotation_mat = self.get_rotation_between_vectors(c_normal, target_normal)
-        
-        # 2. CREATE TRANSFORMATION MATRIX (M)
-        # M = T(P_p) @ R @ T(-C_c)
-        r_mat = np.eye(4); r_mat[:3, :3] = rotation_mat
-        t_to_origin = np.eye(4); t_to_origin[:3, 3] = -c_center
-        t_back = np.eye(4); t_back[:3, 3] = p_center
-        
-        m_align = t_back @ r_mat @ t_to_origin
+        m_align = build_alignment_transform(
+            parent_center=p_center,
+            parent_normal=p_normal,
+            child_center=c_center,
+            child_normal=c_normal,
+            flip=self.flip_check.isChecked(),
+        )
         
         # 3. APPLY TO CURRENT CHILD WORLD POSE
         # W_new = M_align @ W_current
@@ -367,26 +432,6 @@ class AlignPanel(QtWidgets.QWidget):
         self.temp_offset = m_align @ current_world
         
         self.update_preview()
-
-    def get_rotation_between_vectors(self, v_from, v_to):
-        v_from = v_from / np.linalg.norm(v_from)
-        v_to = v_to / np.linalg.norm(v_to)
-        
-        v = np.cross(v_from, v_to)
-        c = np.dot(v_from, v_to)
-        s = np.linalg.norm(v)
-        
-        if s < 1e-6:
-            if c > 0: return np.eye(3)
-            else: # 180 deg rotation
-                ortho = np.array([1, 0, 0]) if abs(v_from[0]) < 0.9 else np.array([0, 1, 0])
-                axis = np.cross(v_from, ortho)
-                axis /= np.linalg.norm(axis)
-                return 2 * np.outer(axis, axis) - np.eye(3)
-
-        v_skew = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
-        rot = np.eye(3) + v_skew + (v_skew @ v_skew) * ((1 - c) / (s**2))
-        return rot
 
     def compute_local_basis(self, normal):
         """Constructs an orthonormal basis where Z axis is aligned with 'normal'."""
@@ -529,8 +574,15 @@ class AlignPanel(QtWidgets.QWidget):
         self.parent_label.setText("Parent: None selected")
         self.child_label.setText("Child: None selected")
         
-        # 3. Finalize the Robot Model
-        child_link.t_offset = final_world
+        # 3. Finalize the Robot Model. If no motion joint is created later,
+        # the aligned child still follows the selected parent as a rigid part.
+        self.ensure_rigid_alignment_joint(
+            parent_cache['name'],
+            child_name,
+            final_world,
+            contact_point=self.alignment_point,
+        )
+        self.mw.canvas.update_transforms(self.mw.robot)
 
         # 4. Lock and Log
         self.mw.log(f"ALIGNMENT LOCKED: {child_name} position updated.")
@@ -543,7 +595,7 @@ class AlignPanel(QtWidgets.QWidget):
             self.mw.joint_tab.alignment_point = self.alignment_point.copy()
             
             # Switch to Joint Tab (Index 2)
-            self.mw.switch_panel(2)
+            self.mw.switch_panel(1)
             
             # Trigger 'create_joint' logic
             self.mw.joint_tab.create_joint()
@@ -552,3 +604,17 @@ class AlignPanel(QtWidgets.QWidget):
         for s in self.sliders.values(): s.setValue(0)
         self.mw.robot.update_kinematics()
         self.mw.canvas.update_transforms(self.mw.robot)
+
+    def ensure_rigid_alignment_joint(self, parent_name, child_name, child_world_transform, contact_point=None):
+        """Attach an aligned child with a fixed joint until the user creates a motion joint."""
+        robot = getattr(self.mw, "robot", None)
+        if robot is None:
+            return None
+        joint = robot.ensure_fixed_joint(
+            parent_name,
+            child_name,
+            child_world_transform=child_world_transform,
+            origin_world=contact_point,
+        )
+        robot.update_kinematics()
+        return joint

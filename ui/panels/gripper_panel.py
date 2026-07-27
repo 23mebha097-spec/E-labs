@@ -18,7 +18,7 @@ class GripperPanel(QtWidgets.QWidget):
         super().__init__()
         self.mw = main_window
         self.init_ui()
-
+    
     def _group_style(self):
         return """
             QGroupBox {
@@ -79,11 +79,96 @@ class GripperPanel(QtWidgets.QWidget):
         layout.setContentsMargins(15, 15, 15, 15)
         layout.setSpacing(12)
 
-        header = QtWidgets.QLabel("GRIPPER CONTROL")
+        header = QtWidgets.QLabel("END-EFFECTOR CONTROL")
         header.setStyleSheet(
             "font-weight: bold; font-size: 16px; color: #2e7d32; margin-bottom: 5px;"
         )
         layout.addWidget(header)
+
+        tool_group = QtWidgets.QGroupBox("1. SELECT TOOL")
+        tool_group.setStyleSheet(self._group_style())
+        tool_layout = QtWidgets.QHBoxLayout(tool_group)
+
+        self.tool_combo = QtWidgets.QComboBox()
+        self.tool_combo.addItems(["Gripper Tool", "Welding Tool", "Painting Tool"])
+        self.tool_combo.setFixedHeight(32)
+        self.tool_combo.setStyleSheet("font-size: 13px; padding: 5px;")
+        tool_layout.addWidget(self.tool_combo)
+        # Preview selection text, but apply UI changes only after OK is clicked
+        self.tool_combo.currentIndexChanged.connect(
+            lambda _index: self.tool_selection_status.setText(
+                f"Selected: {self.tool_combo.currentText()} (press OK)"
+            )
+        )
+
+        self.tool_ok_btn = QtWidgets.QPushButton("OK")
+        self.tool_ok_btn.setFixedSize(80, 32)
+        self.tool_ok_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.tool_ok_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2e7d32;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1b5e20; }
+            QPushButton:pressed { background-color: #145a2d; }
+        """)
+        self.tool_ok_btn.clicked.connect(self.on_select_tool_ok)
+        tool_layout.addWidget(self.tool_ok_btn)
+
+        self.tool_selection_status = QtWidgets.QLabel("No tool selected")
+        self.tool_selection_status.setStyleSheet("color: #616161; font-size: 12px; margin-left: 10px;")
+        tool_layout.addWidget(self.tool_selection_status)
+
+        layout.addWidget(tool_group)
+
+        self.end_effector_summary_group = QtWidgets.QGroupBox("END-EFFECTOR SUMMARY")
+        self.end_effector_summary_group.setStyleSheet(self._group_style())
+        summary_layout = QtWidgets.QVBoxLayout(self.end_effector_summary_group)
+
+        self.end_effector_summary_tool = QtWidgets.QLabel("selected tool: -")
+        self.end_effector_summary_tool.setStyleSheet("color: #2e7d32; font-size: 14px; font-weight: bold;")
+        summary_layout.addWidget(self.end_effector_summary_tool)
+
+        self.end_effector_summary_detail = QtWidgets.QLabel("tool info: -")
+        self.end_effector_summary_detail.setStyleSheet("color: #2e7d32; font-size: 14px; font-weight: bold;")
+        summary_layout.addWidget(self.end_effector_summary_detail)
+
+        self.end_effector_summary_note = QtWidgets.QLabel("Save a tool to lock in the summary.")
+        self.end_effector_summary_note.setWordWrap(True)
+        self.end_effector_summary_note.setStyleSheet("color: #616161; font-size: 12px;")
+        summary_layout.addWidget(self.end_effector_summary_note)
+
+        self.delete_end_effector_btn = QtWidgets.QPushButton("Delete End-Effector")
+        self.delete_end_effector_btn.setFixedHeight(34)
+        self.delete_end_effector_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.delete_end_effector_btn.setToolTip(
+            "Remove the saved end-effector configuration and choose another tool"
+        )
+        self.delete_end_effector_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                color: #c62828;
+                border: 1px solid #c62828;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background-color: #ffebee;
+                border-color: #b71c1c;
+            }
+            QPushButton:pressed {
+                background-color: #ffcdd2;
+            }
+        """)
+        self.delete_end_effector_btn.clicked.connect(self.on_delete_end_effector)
+        summary_layout.addWidget(self.delete_end_effector_btn)
+
+        self.end_effector_summary_group.setVisible(False)
+        layout.addWidget(self.end_effector_summary_group)
 
         # --- MAKE ROBO BUTTON ---
         self.make_robo_btn = QtWidgets.QPushButton("🚀 Make Robo")
@@ -102,94 +187,56 @@ class GripperPanel(QtWidgets.QWidget):
             QPushButton:pressed { background-color: #0d47a1; }
         """)
         self.make_robo_btn.clicked.connect(self.on_make_robo)
+        self.make_robo_btn.setVisible(False)
         layout.addWidget(self.make_robo_btn)
 
-        selection_group = QtWidgets.QGroupBox("1. SELECT GRIPPER JOINT")
-        selection_group.setStyleSheet(self._group_style())
-        sel_layout = QtWidgets.QVBoxLayout(selection_group)
+        self.selection_group = QtWidgets.QGroupBox("2. SELECT JOINTS")
+        self.selection_group.setStyleSheet(self._group_style())
+        sel_layout = QtWidgets.QVBoxLayout(self.selection_group)
 
         self.joints_list = QtWidgets.QListWidget()
         self.joints_list.setFixedHeight(120)
+        self.joints_list.setSelectionMode(QtWidgets.QAbstractItemView.MultiSelection)
+        self.joints_list.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.joints_list.setStyleSheet(self._surface_list_style())
         self.joints_list.itemClicked.connect(self.on_joint_selected)
+        self.joints_list.itemSelectionChanged.connect(self.on_joint_list_selection_changed)
         sel_layout.addWidget(self.joints_list)
 
-        self.mark_gripper_check = QtWidgets.QCheckBox("Mark as Gripper")
-        self.mark_gripper_check.setStyleSheet(
-            "font-weight: bold; color: #2e7d32; padding: 5px;"
-        )
-        self.mark_gripper_check.toggled.connect(self.on_mark_toggled)
-        sel_layout.addWidget(self.mark_gripper_check)
-
-        layout.addWidget(selection_group)
-
-        control_group = QtWidgets.QGroupBox("2. MANUAL ACTIONS")
-        control_group.setStyleSheet(self._group_style())
-        ctrl_layout = QtWidgets.QVBoxLayout(control_group)
-
-        ctrl_layout.addWidget(QtWidgets.QLabel("Precision Stroke:"))
-        self.stroke_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
-        self.stroke_slider.setRange(0, 100)
-        self.stroke_slider.setStyleSheet("""
-            QSlider::groove:horizontal { height: 6px; background: #eee; border-radius: 3px; }
-            QSlider::handle:horizontal {
-                background: white;
-                border: 2px solid #2e7d32;
-                width: 14px;
-                height: 14px;
-                margin-top: -5px;
-                border-radius: 7px;
-            }
-        """)
-        self.stroke_slider.valueChanged.connect(self.on_stroke_changed)
-        ctrl_layout.addWidget(self.stroke_slider)
-
-        layout.addWidget(control_group)
-
-
-        compute_group = QtWidgets.QGroupBox("3. GRIPPER COMPUTE")
-        compute_group.setStyleSheet(self._group_style())
-        compute_layout = QtWidgets.QVBoxLayout(compute_group)
-
-        compute_hint = QtWidgets.QLabel(
-            "Select a gripper pair and press Compute to analyze the jaw shape, opening axis, and pick-and-place fit."
-        )
-        compute_hint.setWordWrap(True)
-        compute_hint.setStyleSheet("color: #616161; font-size: 12px;")
-        compute_layout.addWidget(compute_hint)
-
-        self.compute_btn = QtWidgets.QPushButton("Compute")
-        self.compute_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.compute_btn.setStyleSheet("""
+        self.gripper_compile_btn = QtWidgets.QPushButton("Compile")
+        self.gripper_compile_btn.setFixedHeight(34)
+        self.gripper_compile_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.gripper_compile_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2e7d32;
+                background-color: #1976d2;
                 color: white;
                 border: none;
                 border-radius: 6px;
-                padding: 8px 14px;
                 font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #25692a;
-            }
-            QPushButton:disabled {
-                background-color: #c8e6c9;
-                color: #7f8b7f;
-            }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
         """)
-        self.compute_btn.clicked.connect(self.on_compute_gripper_clicked)
-        compute_layout.addWidget(self.compute_btn)
+        self.gripper_compile_btn.clicked.connect(self.on_gripper_compile_clicked)
+        sel_layout.addWidget(self.gripper_compile_btn)
 
-        self.compute_table = QtWidgets.QTableWidget(0, 2)
-        self.compute_table.setHorizontalHeaderLabels(["Metric", "Value"])
-        self.compute_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
-        self.compute_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
-        self.compute_table.setFocusPolicy(QtCore.Qt.NoFocus)
-        self.compute_table.setAlternatingRowColors(True)
-        self.compute_table.horizontalHeader().setStretchLastSection(True)
-        self.compute_table.verticalHeader().setVisible(False)
-        self.compute_table.setMinimumHeight(180)
-        self.compute_table.setStyleSheet("""
+        self.gripper_face_status = QtWidgets.QLabel(
+            "Select the jaw joints and press Compile. Contact faces are detected automatically."
+        )
+        self.gripper_face_status.setWordWrap(True)
+        self.gripper_face_status.setStyleSheet("color: #616161; font-size: 12px;")
+        sel_layout.addWidget(self.gripper_face_status)
+
+        self.face_selection_table = QtWidgets.QTableWidget(0, 2)
+        self.face_selection_table.setHorizontalHeaderLabels(["Joint", "Selected Face"])
+        self.face_selection_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.face_selection_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.face_selection_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.face_selection_table.setMinimumHeight(120)
+        self.face_selection_table.verticalHeader().setVisible(False)
+        self.face_selection_table.verticalHeader().setDefaultSectionSize(38)
+        self.face_selection_table.horizontalHeader().setStretchLastSection(True)
+        self.face_selection_table.setStyleSheet("""
             QTableWidget {
                 background: white;
                 border: 1px solid #e0e0e0;
@@ -205,16 +252,318 @@ class GripperPanel(QtWidgets.QWidget):
                 font-weight: bold;
             }
         """)
-        compute_layout.addWidget(self.compute_table)
+        sel_layout.addWidget(self.face_selection_table)
 
-        self.compute_note_label = QtWidgets.QLabel(
-            "Shape profile only. Force/torque and motor load are not computed here."
+        self.gripper_alignment_btn = QtWidgets.QPushButton("Select Gripping / Alignment Face")
+        self.gripper_alignment_btn.setFixedHeight(34)
+        self.gripper_alignment_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.gripper_alignment_btn.setToolTip(
+            "Select a gripper-tool face manually. Its center becomes the Live Point and "
+            "its plane remains parallel to the object's base during Pick & Place."
         )
-        self.compute_note_label.setWordWrap(True)
-        self.compute_note_label.setStyleSheet("color: #757575; font-size: 12px;")
-        compute_layout.addWidget(self.compute_note_label)
+        self.gripper_alignment_btn.setStyleSheet("""
+            QPushButton {
+                background-color: white;
+                color: #1565c0;
+                border: 1px solid #1976d2;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #e3f2fd; }
+            QPushButton:pressed { background-color: #bbdefb; }
+            QPushButton:disabled { color: #9e9e9e; border-color: #bdbdbd; }
+        """)
+        self.gripper_alignment_btn.clicked.connect(self.on_select_gripper_alignment_face)
+        self.gripper_alignment_btn.setEnabled(False)
+        sel_layout.addWidget(self.gripper_alignment_btn)
 
-        layout.addWidget(compute_group)
+        self.gripper_alignment_status = QtWidgets.QLabel(
+            "Gripping face and Live Point: not selected"
+        )
+        self.gripper_alignment_status.setWordWrap(True)
+        self.gripper_alignment_status.setStyleSheet("color: #616161; font-size: 12px;")
+        sel_layout.addWidget(self.gripper_alignment_status)
+
+        self.gripper_live_point_preview = QtWidgets.QLabel("Live Point Preview: not set")
+        self.gripper_live_point_preview.setWordWrap(True)
+        self.gripper_live_point_preview.setStyleSheet("color: #2e7d32; font-size: 12px; font-weight: bold;")
+        sel_layout.addWidget(self.gripper_live_point_preview)
+
+        self.gripper_opening_label = QtWidgets.QLabel("Opening Preview")
+        self.gripper_opening_label.setStyleSheet("color: #616161; font-size: 12px; font-weight: bold;")
+        sel_layout.addWidget(self.gripper_opening_label)
+
+        min_opening_layout = QtWidgets.QHBoxLayout()
+        min_opening_layout.addWidget(QtWidgets.QLabel("Min Opening (deg)"))
+        self.gripper_min_input = QtWidgets.QSpinBox()
+        self.gripper_min_input.setRange(0, 180)
+        self.gripper_min_input.setValue(0)
+        self.gripper_min_input.valueChanged.connect(self.on_gripper_opening_slider_changed)
+        min_opening_layout.addWidget(self.gripper_min_input)
+        sel_layout.addLayout(min_opening_layout)
+
+        max_opening_layout = QtWidgets.QHBoxLayout()
+        max_opening_layout.addWidget(QtWidgets.QLabel("Max Opening (deg)"))
+        self.gripper_max_input = QtWidgets.QSpinBox()
+        self.gripper_max_input.setRange(0, 180)
+        self.gripper_max_input.setValue(40)
+        self.gripper_max_input.valueChanged.connect(self.on_gripper_opening_slider_changed)
+        max_opening_layout.addWidget(self.gripper_max_input)
+        sel_layout.addLayout(max_opening_layout)
+
+        self.gripper_save_btn = QtWidgets.QPushButton("Save")
+        self.gripper_save_btn.setFixedHeight(34)
+        self.gripper_save_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.gripper_save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2e7d32;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1b5e20; }
+            QPushButton:pressed { background-color: #145a2d; }
+        """)
+        self.gripper_save_btn.clicked.connect(self.on_gripper_save_clicked)
+        self.gripper_save_btn.setEnabled(False)
+        sel_layout.addWidget(self.gripper_save_btn)
+        self.gripper_save_btn.setVisible(False)
+
+        self.mark_gripper_check = QtWidgets.QCheckBox("Mark as Gripper")
+        self.mark_gripper_check.setStyleSheet(
+            "font-weight: bold; color: #2e7d32; padding: 5px;"
+        )
+        self.mark_gripper_check.toggled.connect(self.on_mark_toggled)
+        self.mark_gripper_check.setVisible(False)
+        sel_layout.addWidget(self.mark_gripper_check)
+
+        self._gripper_face_selection_queue = []
+        self._pending_gripper_contact_joint_name = None
+        self._gripper_face_selection_data = {}
+        self._gripper_selection_joint_names = []
+        self._gripper_live_point_world = None
+        self._gripper_joint_endpoints = {}
+        self._gripper_alignment_face_data = None
+        self._gripper_tool_selected = False
+        self._gripper_confirmation_mode = False
+
+        layout.addWidget(self.selection_group)
+
+        self.control_group = QtWidgets.QGroupBox("2. MANUAL ACTIONS")
+        self.control_group.setStyleSheet(self._group_style())
+        ctrl_layout = QtWidgets.QVBoxLayout(self.control_group)
+
+        self.gripper_opening_control_label = QtWidgets.QLabel("Gripper Opening (all jaws): 0% - Closed")
+        self.gripper_opening_control_label.setStyleSheet("font-weight: bold; color: #2e7d32;")
+        ctrl_layout.addWidget(self.gripper_opening_control_label)
+        self.stroke_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        self.stroke_slider.setRange(0, 100)
+        self.stroke_slider.setToolTip("One shared control: 0% closes every jaw and 100% opens every jaw")
+        self.stroke_slider.setStyleSheet("""
+            QSlider::groove:horizontal { height: 6px; background: #eee; border-radius: 3px; }
+            QSlider::handle:horizontal {
+                background: white;
+                border: 2px solid #2e7d32;
+                width: 14px;
+                height: 14px;
+                margin-top: -5px;
+                border-radius: 7px;
+            }
+        """)
+        self.stroke_slider.valueChanged.connect(self.on_stroke_changed)
+        ctrl_layout.addWidget(self.stroke_slider)
+
+        layout.addWidget(self.control_group)
+
+
+        # --- WELDING TOOL SETUP (visible only when Welding Tool selected) ---
+        self.welding_group = QtWidgets.QGroupBox("WELDING TOOL SETUP")
+        self.welding_group.setStyleSheet(self._group_style())
+        weld_layout = QtWidgets.QVBoxLayout(self.welding_group)
+
+        face_label = QtWidgets.QLabel("Selected Face (Live Point)")
+        face_label.setStyleSheet("font-weight: bold; color: #424242;")
+        weld_layout.addWidget(face_label)
+
+        self.weld_face_name = QtWidgets.QLineEdit()
+        self.weld_face_name.setPlaceholderText("Face_12")
+        self.weld_face_name.setFixedHeight(28)
+        weld_layout.addWidget(self.weld_face_name)
+
+        self.weld_compile_btn = QtWidgets.QPushButton("Compile")
+        self.weld_compile_btn.setFixedHeight(32)
+        self.weld_compile_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.weld_compile_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1976d2;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
+        """)
+        self.weld_compile_btn.clicked.connect(self.on_weld_tool_compile)
+        weld_layout.addWidget(self.weld_compile_btn)
+
+        self.weld_compile_status = QtWidgets.QLabel("Enter the tool filename and press Compile.")
+        self.weld_compile_status.setStyleSheet("color: #616161; font-size: 12px; margin-top: 4px;")
+        weld_layout.addWidget(self.weld_compile_status)
+
+        # 2. Tool Direction
+        dir_label = QtWidgets.QLabel("2. Tool Direction")
+        dir_label.setStyleSheet("font-weight: bold; color: #424242;")
+        weld_layout.addWidget(dir_label)
+
+        self.weld_dir_combo = QtWidgets.QComboBox()
+        self.weld_dir_combo.addItems(["Normal of Selected Face"])
+        self.weld_dir_combo.setFixedHeight(28)
+        weld_layout.addWidget(self.weld_dir_combo)
+
+        # 3. Tool Information (Auto Calculated)
+        info_label = QtWidgets.QLabel("3. Tool Information (Auto Calculated)")
+        info_label.setStyleSheet("font-weight: bold; color: #424242;")
+        weld_layout.addWidget(info_label)
+
+        coord_layout = QtWidgets.QGridLayout()
+        coord_layout.setSpacing(6)
+        coord_layout.addWidget(QtWidgets.QLabel("Live Point (TCP) Position (mm)"), 0, 0, 1, 3)
+        self.weld_tcp_x = QtWidgets.QLineEdit(); self.weld_tcp_y = QtWidgets.QLineEdit(); self.weld_tcp_z = QtWidgets.QLineEdit()
+        for widget in (self.weld_tcp_x, self.weld_tcp_y, self.weld_tcp_z):
+            widget.setFixedHeight(26); widget.setReadOnly(True)
+        coord_layout.addWidget(QtWidgets.QLabel("X"), 1, 0); coord_layout.addWidget(self.weld_tcp_x, 1, 1)
+        coord_layout.addWidget(QtWidgets.QLabel("Y"), 2, 0); coord_layout.addWidget(self.weld_tcp_y, 2, 1)
+        coord_layout.addWidget(QtWidgets.QLabel("Z"), 3, 0); coord_layout.addWidget(self.weld_tcp_z, 3, 1)
+
+        coord_layout.addWidget(QtWidgets.QLabel("Tool Axis (Direction Vector)"), 4, 0, 1, 3)
+        self.weld_axis_x = QtWidgets.QLineEdit(); self.weld_axis_y = QtWidgets.QLineEdit(); self.weld_axis_z = QtWidgets.QLineEdit()
+        for widget in (self.weld_axis_x, self.weld_axis_y, self.weld_axis_z):
+            widget.setFixedHeight(26); widget.setReadOnly(True)
+        coord_layout.addWidget(QtWidgets.QLabel("X"), 5, 0); coord_layout.addWidget(self.weld_axis_x, 5, 1)
+        coord_layout.addWidget(QtWidgets.QLabel("Y"), 6, 0); coord_layout.addWidget(self.weld_axis_y, 6, 1)
+        coord_layout.addWidget(QtWidgets.QLabel("Z"), 7, 0); coord_layout.addWidget(self.weld_axis_z, 7, 1)
+
+        weld_layout.addLayout(coord_layout)
+        layout.addWidget(self.welding_group)
+
+        # --- PAINTING TOOL SETUP (visible only when Painting Tool selected) ---
+        self.painting_group = QtWidgets.QGroupBox("PAINTING TOOL SETUP")
+        self.painting_group.setStyleSheet(self._group_style())
+        paint_layout = QtWidgets.QVBoxLayout(self.painting_group)
+
+        nozzle_face_label = QtWidgets.QLabel("1. Nozzle Face (Spray Face)")
+        nozzle_face_label.setStyleSheet("font-weight: bold; color: #424242;")
+        paint_layout.addWidget(nozzle_face_label)
+
+        self.paint_face_status = QtWidgets.QLabel("Nozzle face selected: nil")
+        self.paint_face_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 6px;")
+        paint_layout.addWidget(self.paint_face_status)
+
+        self.paint_compile_btn = QtWidgets.QPushButton("Compile")
+        self.paint_compile_btn.setFixedHeight(34)
+        self.paint_compile_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.paint_compile_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #1976d2;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1565c0; }
+            QPushButton:pressed { background-color: #0d47a1; }
+        """)
+        self.paint_compile_btn.clicked.connect(self.on_paint_tool_compile)
+        paint_layout.addWidget(self.paint_compile_btn)
+
+        self.paint_tool_status = QtWidgets.QLineEdit()
+        self.paint_tool_status.setReadOnly(True)
+        self.paint_tool_status.setText("Click a nozzle face, then press Compile.")
+        self.paint_tool_status.setFixedHeight(28)
+        paint_layout.addWidget(self.paint_tool_status)
+
+        self.paint_tcp_position_label = QtWidgets.QLabel("2. TCP Position (Auto)")
+        self.paint_tcp_position_label.setStyleSheet("font-weight: bold; color: #424242;")
+        paint_layout.addWidget(self.paint_tcp_position_label)
+
+        paint_coord_layout = QtWidgets.QGridLayout()
+        paint_coord_layout.setSpacing(6)
+        paint_coord_layout.addWidget(QtWidgets.QLabel("X"), 0, 0)
+        paint_coord_layout.addWidget(QtWidgets.QLabel("Y"), 1, 0)
+        paint_coord_layout.addWidget(QtWidgets.QLabel("Z"), 2, 0)
+        self.paint_tcp_x = QtWidgets.QLineEdit()
+        self.paint_tcp_y = QtWidgets.QLineEdit()
+        self.paint_tcp_z = QtWidgets.QLineEdit()
+        for widget in (self.paint_tcp_x, self.paint_tcp_y, self.paint_tcp_z):
+            widget.setReadOnly(True)
+            widget.setFixedHeight(26)
+            widget.setText("nil")
+        paint_coord_layout.addWidget(self.paint_tcp_x, 0, 1)
+        paint_coord_layout.addWidget(self.paint_tcp_y, 1, 1)
+        paint_coord_layout.addWidget(self.paint_tcp_z, 2, 1)
+        paint_layout.addLayout(paint_coord_layout)
+
+        self.paint_tcp_direction_label = QtWidgets.QLabel("3. TCP Direction (Auto)")
+        self.paint_tcp_direction_label.setStyleSheet("font-weight: bold; color: #424242;")
+        paint_layout.addWidget(self.paint_tcp_direction_label)
+
+        paint_dir_layout = QtWidgets.QGridLayout()
+        paint_dir_layout.setSpacing(6)
+        paint_dir_layout.addWidget(QtWidgets.QLabel("X"), 0, 0)
+        paint_dir_layout.addWidget(QtWidgets.QLabel("Y"), 1, 0)
+        paint_dir_layout.addWidget(QtWidgets.QLabel("Z"), 2, 0)
+        self.paint_dir_x = QtWidgets.QLineEdit()
+        self.paint_dir_y = QtWidgets.QLineEdit()
+        self.paint_dir_z = QtWidgets.QLineEdit()
+        for widget in (self.paint_dir_x, self.paint_dir_y, self.paint_dir_z):
+            widget.setReadOnly(True)
+            widget.setFixedHeight(26)
+            widget.setText("nil")
+        paint_dir_layout.addWidget(self.paint_dir_x, 0, 1)
+        paint_dir_layout.addWidget(self.paint_dir_y, 1, 1)
+        paint_dir_layout.addWidget(self.paint_dir_z, 2, 1)
+        paint_layout.addLayout(paint_dir_layout)
+
+        paint_note = QtWidgets.QLabel(
+            "TCP and direction are calculated automatically from the selected nozzle face."
+        )
+        paint_note.setWordWrap(True)
+        paint_note.setStyleSheet("color: #757575; font-size: 12px;")
+        paint_layout.addWidget(paint_note)
+
+        layout.addWidget(self.painting_group)
+
+        self.tool_save_btn = QtWidgets.QPushButton("Save")
+        self.tool_save_btn.setFixedHeight(36)
+        self.tool_save_btn.setCursor(QtCore.Qt.PointingHandCursor)
+        self.tool_save_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #2e7d32;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover { background-color: #1b5e20; }
+            QPushButton:pressed { background-color: #145a2d; }
+            QPushButton:disabled {
+                background-color: #c8e6c9;
+                color: #7f8b7f;
+            }
+        """)
+        self.tool_save_btn.clicked.connect(self.on_tool_save_clicked)
+        self.tool_save_btn.setVisible(False)
+        layout.addWidget(self.tool_save_btn)
+
+        # hide welding and painting groups by default; shown only when selected
+        self.welding_group.setVisible(False)
+        self.painting_group.setVisible(False)
+        self.selection_group.setVisible(False)
+        self.control_group.setVisible(False)
+        layout.addStretch()
 
         layout.addStretch()
 
@@ -223,6 +572,85 @@ class GripperPanel(QtWidgets.QWidget):
         if not item:
             return None
         return item.data(QtCore.Qt.UserRole)
+
+    def _apply_tool_selection(self, selected_tool):
+        """Enable/disable UI elements according to the selected end-effector tool."""
+        tool_key = (selected_tool or "").strip().lower()
+        is_gripper = tool_key == "gripper tool"
+        weld_visible = tool_key == "welding tool"
+        paint_visible = tool_key == "painting tool"
+        show_gripper_workflow = is_gripper and not self._gripper_confirmation_mode
+
+        # Gripper-specific widgets
+        if hasattr(self, 'joints_list'):
+            self.joints_list.setEnabled(is_gripper)
+        if hasattr(self, 'mark_gripper_check'):
+            # If tool is not gripper, ensure nothing remains marked
+            if not is_gripper:
+                try:
+                    # unmark currently displayed selection without emitting signals
+                    self.mark_gripper_check.blockSignals(True)
+                    self.mark_gripper_check.setChecked(False)
+                finally:
+                    self.mark_gripper_check.blockSignals(False)
+            self.mark_gripper_check.setEnabled(is_gripper)
+        if hasattr(self, 'stroke_slider'):
+            self.stroke_slider.setEnabled(is_gripper)
+
+        # Welding tool UI
+        if hasattr(self, 'welding_group'):
+            self.welding_group.setVisible(weld_visible)
+            if weld_visible:
+                self.weld_face_name.setText("nil")
+                self.weld_tcp_x.setText("nil")
+                self.weld_tcp_y.setText("nil")
+                self.weld_tcp_z.setText("nil")
+                self.weld_axis_x.setText("nil")
+                self.weld_axis_y.setText("nil")
+                self.weld_axis_z.setText("nil")
+                if hasattr(self, 'weld_compile_status'):
+                    self.weld_compile_status.setText("Click a face in the 3D view to set the welding live point.")
+                try:
+                    self._start_weld_face_picking()
+                except Exception:
+                    pass
+
+        # Painting tool UI
+        if hasattr(self, 'painting_group'):
+            self.painting_group.setVisible(paint_visible)
+            if paint_visible:
+                self.paint_tool_status.setText("Click a nozzle face in the 3D view.")
+                self.paint_face_status.setText("Nozzle face selected: nil")
+                self.paint_tcp_x.setText("nil")
+                self.paint_tcp_y.setText("nil")
+                self.paint_tcp_z.setText("nil")
+                self.paint_dir_x.setText("nil")
+                self.paint_dir_y.setText("nil")
+                self.paint_dir_z.setText("nil")
+                try:
+                    self.mw.canvas.start_face_picking(self.on_paint_nozzle_face_picked, color="green")
+                    self.mw.log("Painting tool active. Click a face to assign nozzle TCP.")
+                    self.mw.show_toast("Select the nozzle face in 3D view", "info")
+                except Exception:
+                    pass
+
+        # Show only the selected tool's relevant controls
+        if hasattr(self, 'selection_group'):
+            self.selection_group.setVisible(show_gripper_workflow)
+        if hasattr(self, 'control_group'):
+            self.control_group.setVisible(show_gripper_workflow)
+
+        # when welding or painting is visible, keep gripper controls disabled
+        if weld_visible or paint_visible:
+            try:
+                if hasattr(self, 'joints_list'):
+                    self.joints_list.setEnabled(False)
+                if hasattr(self, 'mark_gripper_check'):
+                    self.mark_gripper_check.setEnabled(False)
+                if hasattr(self, 'stroke_slider'):
+                    self.stroke_slider.setEnabled(False)
+            except Exception:
+                pass
 
 
     def _selected_group_members(self):
@@ -236,114 +664,6 @@ class GripperPanel(QtWidgets.QWidget):
             members = [selected] if isinstance(selected, str) else []
 
         return [name for name in members if isinstance(name, str) and name in self.mw.robot.joints]
-
-    def _refresh_compute_ui(self):
-        if not hasattr(self, "compute_btn") or not hasattr(self, "compute_table"):
-            return
-
-        item = self.joints_list.currentItem()
-        members = self._selected_group_members()
-        selected_name = item.text() if item else "the selected pair"
-        pair_ready = len(members) >= 2 and any(
-            getattr(self.mw.robot.joints.get(name), "is_gripper", False) for name in members
-        )
-        object_ready = self._selected_sim_object_name() is not None
-
-        self.compute_btn.setEnabled(pair_ready)
-        if pair_ready and object_ready:
-            self.compute_note_label.setText(
-                f"Ready to compute for {selected_name}. Object data will be included if selected."
-            )
-        elif pair_ready:
-            self.compute_note_label.setText(
-                "Ready to compute gripper opening for the selected pair. Select an imported object to also check fit."
-            )
-        else:
-            self.compute_note_label.setText(
-                "Select a marked gripper pair to enable the compute button."
-            )
-
-        self.compute_table.setRowCount(0)
-
-    def _selected_sim_object_name(self):
-        if hasattr(self.mw, "sim_objects_list"):
-            item = self.mw.sim_objects_list.currentItem()
-            if item:
-                return item.text()
-
-        sim_tab = getattr(self.mw, "simulation_tab", None)
-        if sim_tab is not None and hasattr(sim_tab, "objects_list"):
-            item = sim_tab.objects_list.currentItem()
-            if item:
-                return item.text()
-
-        return None
-
-    def _selected_sim_object_summary(self):
-        sim_tab = getattr(self.mw, "simulation_tab", None)
-        obj_name = self._selected_sim_object_name()
-        if sim_tab is None or obj_name is None or obj_name not in self.mw.robot.links:
-            return None
-
-        link = self.mw.robot.links[obj_name]
-        ratio = getattr(self.mw.canvas, "grid_units_per_cm", 1.0) or 1.0
-
-        if hasattr(sim_tab, "refresh_object_info"):
-            sim_tab.refresh_object_info(obj_name)
-
-        def _coords_from_spinboxes(xs, ys, zs):
-            return (
-                float(xs.value()) if xs is not None else 0.0,
-                float(ys.value()) if ys is not None else 0.0,
-                float(zs.value()) if zs is not None else 0.0,
-            )
-
-        pick = _coords_from_spinboxes(
-            getattr(sim_tab, "pick_x", None),
-            getattr(sim_tab, "pick_y", None),
-            getattr(sim_tab, "pick_z", None),
-        )
-        place = _coords_from_spinboxes(
-            getattr(sim_tab, "place_x", None),
-            getattr(sim_tab, "place_y", None),
-            getattr(sim_tab, "place_z", None),
-        )
-        live = _coords_from_spinboxes(
-            getattr(sim_tab, "live_x", None),
-            getattr(sim_tab, "live_y", None),
-            getattr(sim_tab, "live_z", None),
-        )
-        dims = _coords_from_spinboxes(
-            getattr(sim_tab, "obj_width", None),
-            getattr(sim_tab, "obj_depth", None),
-            getattr(sim_tab, "obj_height", None),
-        )
-
-        grip_width_cm = None
-        grip_height_cm = None
-        if hasattr(sim_tab, "_get_object_grip_width"):
-            try:
-                grip_width, z_offset, _ = sim_tab._get_object_grip_width()
-                if grip_width is not None:
-                    grip_width_cm = float(grip_width) / ratio
-                if z_offset is not None:
-                    grip_height_cm = float(z_offset) / ratio
-            except Exception:
-                grip_width_cm = None
-                grip_height_cm = None
-
-        current_pos = tuple((link.t_world[:3, 3] / ratio).tolist())
-
-        return {
-            "name": obj_name,
-            "pick": pick,
-            "place": place,
-            "live": live,
-            "dims": dims,
-            "current_pos": current_pos,
-            "grip_width_cm": grip_width_cm,
-            "grip_height_cm": grip_height_cm,
-        }
 
     def _format_cm(self, value):
         return f"{value:.2f} cm"
@@ -365,275 +685,6 @@ class GripperPanel(QtWidgets.QWidget):
         axis_name = "XYZ"[idx]
         sign = "+" if arr[idx] >= 0 else "-"
         return f"{axis_name}{sign}"
-
-    def _gripper_shape_profile(self, anchor_link, summary):
-        ratio = getattr(self.mw.canvas, "grid_units_per_cm", 1.0) or 1.0
-        geo_data = None
-        finger_count = 0
-        span_axis = "Unknown"
-        approach_axis = "Unknown"
-        shape_label = "Unknown"
-        grip_style = "Generic contact"
-        contact_mode = "Fallback"
-        strategy = "Center the object on the TCP before closing."
-        reach_cm = 0.0
-        span_cm = summary["max_gap_cm"]
-
-        if anchor_link is not None and hasattr(self.mw, "get_link_tool_point"):
-            try:
-                _, _, geo_data = self.mw.get_link_tool_point(anchor_link, return_vec=True)
-            except Exception:
-                geo_data = None
-
-        if isinstance(geo_data, dict):
-            finger_count = len(geo_data.get("fingers_world", []) or [])
-            span_axis = self._axis_label(geo_data.get("primary_axis"))
-            approach_axis = self._axis_label(geo_data.get("approach_axis"))
-            reach_raw = geo_data.get("finger_depth", 0.0) or 0.0
-            span_raw = geo_data.get("real_gap", summary["max_gap_cm"] * ratio) or 0.0
-            reach_cm = float(reach_raw) / ratio
-            span_cm = float(span_raw) / ratio
-
-            if geo_data.get("using_selected_gripping_surfaces"):
-                shape_label = "Face clamp"
-                grip_style = "Selected face-to-face contact"
-                contact_mode = "Selected surfaces"
-                strategy = "Keep the object centered between the selected gripping faces."
-            elif finger_count >= 3:
-                shape_label = f"Multi-finger ({finger_count})"
-                grip_style = "Distributed pinch"
-                contact_mode = "Finger cluster"
-                strategy = "Use the span axis for thickness and keep the approach axis aligned."
-            elif finger_count == 2:
-                shape_label = "Parallel jaw"
-                grip_style = "Two-finger pinch"
-                contact_mode = "Two-jaw"
-                strategy = "Align the narrow object dimension with the jaw span before closing."
-            elif finger_count == 1:
-                shape_label = "Single-contact / leaf"
-                grip_style = "Single surface support"
-                contact_mode = "Leaf / single point"
-                strategy = "Approach gently and keep the object centered on the TCP."
-            else:
-                shape_label = "Fallback mesh gripper"
-                grip_style = "Mesh-based estimate"
-                contact_mode = "Mesh estimate"
-                strategy = "Use the object's measured thickness to choose a safe open gap."
-
-        return {
-            "shape_label": shape_label,
-            "grip_style": grip_style,
-            "contact_mode": contact_mode,
-            "strategy": strategy,
-            "finger_count": finger_count,
-            "span_axis": span_axis,
-            "approach_axis": approach_axis,
-            "reach_cm": reach_cm,
-            "span_cm": span_cm,
-            "anchor_link": anchor_link.name if anchor_link is not None else "-",
-        }
-
-    def _set_compute_rows(self, rows):
-        self.compute_table.setRowCount(len(rows))
-        for row, (metric, value) in enumerate(rows):
-            metric_item = QtWidgets.QTableWidgetItem(metric)
-            metric_item.setFlags(metric_item.flags() & ~QtCore.Qt.ItemIsEditable)
-            value_item = QtWidgets.QTableWidgetItem(value)
-            value_item.setFlags(value_item.flags() & ~QtCore.Qt.ItemIsEditable)
-            self.compute_table.setItem(row, 0, metric_item)
-            self.compute_table.setItem(row, 1, value_item)
-
-        self.compute_table.resizeRowsToContents()
-
-    def _compute_selected_pair_summary(self):
-        members = self._selected_group_members()
-        if len(members) < 2:
-            return None
-
-        selected_item = self.joints_list.currentItem()
-        pair_label = selected_item.text() if selected_item else ", ".join(members)
-        selected_joints = [self.mw.robot.joints[name] for name in members if name in self.mw.robot.joints]
-        if len(selected_joints) < 2:
-            return None
-
-        saved_active_names = list(getattr(self.mw, "active_gripper_joint_names", []) or [])
-        saved_active_name = getattr(self.mw, "active_gripper_joint_name", None)
-        summary = None
-
-        try:
-            self.mw.active_gripper_joint_names = members
-            self.mw.active_gripper_joint_name = members[0]
-
-            if hasattr(self.mw, "_control_gripper_fingers"):
-                self.mw._control_gripper_fingers(close=False, apply=False)
-
-            gap_limits = getattr(self.mw, "_last_gripper_gap_limits", {}) or {}
-            global_limits = gap_limits.get("_global")
-            if global_limits is None:
-                all_limits = [
-                    value for value in gap_limits.values()
-                    if isinstance(value, tuple) and len(value) == 2
-                ]
-                if all_limits:
-                    global_limits = (
-                        float(min(limit[0] for limit in all_limits)),
-                        float(max(limit[1] for limit in all_limits)),
-                    )
-
-            ratio = getattr(self.mw.canvas, "grid_units_per_cm", 1.0) or 1.0
-
-            current_gap_cm = None
-            primary_joint = selected_joints[0]
-            parent_link = getattr(primary_joint, "parent_link", None)
-            if parent_link is not None and hasattr(self.mw, "get_link_tool_point"):
-                try:
-                    _, _, gap_value = self.mw.get_link_tool_point(parent_link, return_vec=True)
-                    if isinstance(gap_value, dict):
-                        raw_gap = gap_value.get("real_gap", gap_value.get("centers_span"))
-                        if raw_gap is not None:
-                            current_gap_cm = float(raw_gap) / ratio
-                    elif gap_value is not None:
-                        current_gap_cm = float(gap_value) / ratio
-                except Exception:
-                    current_gap_cm = None
-
-            joint_travel = []
-            for name in members:
-                joint = self.mw.robot.joints.get(name)
-                if joint is None:
-                    continue
-                joint_travel.append(
-                    f"{name}: {self._format_deg(abs(joint.max_limit - joint.min_limit))}"
-                )
-
-            if global_limits is not None:
-                min_gap_cm = float(global_limits[0]) / ratio
-                max_gap_cm = float(global_limits[1]) / ratio
-                hold_width_cm = max(0.0, max_gap_cm - 0.5)
-            else:
-                min_gap_cm = current_gap_cm if current_gap_cm is not None else 0.0
-                max_gap_cm = current_gap_cm if current_gap_cm is not None else 0.0
-                hold_width_cm = max(0.0, max_gap_cm - 0.5)
-
-            travel_cm = max(0.0, max_gap_cm - min_gap_cm)
-            status = "Ready" if max_gap_cm > 0 else "Unable to measure"
-
-            summary = {
-                "pair_label": pair_label,
-                "members": members,
-                "joint_travel": ", ".join(joint_travel) if joint_travel else "-",
-                "min_gap_cm": min_gap_cm,
-                "max_gap_cm": max_gap_cm,
-                "travel_cm": travel_cm,
-                "hold_width_cm": hold_width_cm,
-                "current_gap_cm": current_gap_cm,
-                "status": status,
-            }
-        finally:
-            self.mw.active_gripper_joint_names = saved_active_names
-            self.mw.active_gripper_joint_name = saved_active_name
-
-        if summary is not None:
-            anchor_link = None
-            if selected_joints:
-                for joint in selected_joints:
-                    if joint.parent_link is not None:
-                        anchor_link = joint.parent_link
-                        break
-                if anchor_link is None and selected_joints[0].child_link is not None:
-                    anchor_link = selected_joints[0].child_link
-            summary["shape"] = self._gripper_shape_profile(anchor_link, summary)
-
-        return summary
-
-    def on_compute_gripper_clicked(self):
-        if not hasattr(self, "compute_table"):
-            return
-
-        summary = self._compute_selected_pair_summary()
-        if summary is None:
-            self.compute_note_label.setText(
-                "Select a gripper pair with at least two related joints, then press Compute."
-            )
-            self.compute_table.setRowCount(0)
-            self.mw.show_toast("Select a gripper pair first", "warning")
-            return
-
-        obj_summary = self._selected_sim_object_summary()
-        rows = [
-            ("Selected Pair", summary["pair_label"]),
-            ("Gripper Shape", summary["shape"]["shape_label"]),
-            ("Grip Style", summary["shape"]["grip_style"]),
-            ("Contact Mode", summary["shape"]["contact_mode"]),
-            ("Anchor Link", summary["shape"]["anchor_link"]),
-            ("Finger Count", str(summary["shape"]["finger_count"])),
-            ("Opening Axis", summary["shape"]["span_axis"]),
-            ("Approach Axis", summary["shape"]["approach_axis"]),
-            ("Grip Span", self._format_cm(summary["shape"]["span_cm"])),
-            ("Finger Reach", self._format_cm(summary["shape"]["reach_cm"])),
-            ("Maximum Opening", self._format_cm(summary["max_gap_cm"])),
-            ("Estimated Hold Width", self._format_cm(summary["hold_width_cm"])),
-            ("Current Gap", self._format_cm(summary["current_gap_cm"] or 0.0)),
-            ("Joint Travel", summary["joint_travel"]),
-            ("Status", summary["status"]),
-        ]
-
-        if obj_summary is not None:
-            required_width_cm = obj_summary["grip_width_cm"]
-            if required_width_cm is None:
-                required_width_cm = max(obj_summary["dims"][0], obj_summary["dims"][1])
-
-            object_height_cm = obj_summary["dims"][2]
-            clearance_cm = max(0.5, min(2.0, max(0.5, object_height_cm * 0.12)))
-            squeeze_cm = max(0.05, min(0.25, required_width_cm * 0.03))
-            required_open_cm = required_width_cm + clearance_cm
-            recommended_close_cm = max(0.0, required_width_cm - squeeze_cm)
-            recommended_release_cm = summary["max_gap_cm"]
-            fits = (
-                summary["max_gap_cm"] >= required_open_cm
-                and summary["min_gap_cm"] <= required_width_cm
-            )
-            open_margin_cm = summary["max_gap_cm"] - required_open_cm
-
-            rows.extend([
-                ("Selected Object", obj_summary["name"]),
-                ("P1 (Bottom Face Center)", f"({obj_summary['pick'][0]:.2f}, {obj_summary['pick'][1]:.2f}, {obj_summary['pick'][2]:.2f}) cm"),
-                ("P2 (Bottom Face Center)", f"({obj_summary['place'][0]:.2f}, {obj_summary['place'][1]:.2f}, {obj_summary['place'][2]:.2f}) cm"),
-                ("LP (TCP)", f"({obj_summary['live'][0]:.2f}, {obj_summary['live'][1]:.2f}, {obj_summary['live'][2]:.2f}) cm"),
-                ("DIM", f"{obj_summary['dims'][0]:.2f} x {obj_summary['dims'][1]:.2f} x {obj_summary['dims'][2]:.2f} cm"),
-                ("Required Width", self._format_cm(required_width_cm)),
-                ("Required Open", self._format_cm(required_open_cm)),
-                ("Recommended Close", self._format_cm(recommended_close_cm)),
-                ("Recommended Release", self._format_cm(recommended_release_cm)),
-                ("Open Margin", self._format_cm(open_margin_cm)),
-                ("Pick/Place Tip", summary["shape"]["strategy"]),
-                ("Fit Check", "Fits" if fits else "Too wide"),
-            ])
-
-            if fits:
-                self.compute_note_label.setText(
-                    "Gripper shape and fit computed successfully. Use the opening axis and pick/place tip for a safe grasp."
-                )
-            else:
-                self.compute_note_label.setText(
-                    "Gripper shape computed, but the selected object needs more opening or a smaller grip width."
-                )
-        else:
-            self.compute_note_label.setText(
-                "Gripper shape computed successfully. Select an imported object if you also want fit checking and pick/place execution."
-            )
-
-        self._set_compute_rows(rows)
-        if obj_summary is None:
-            return
-
-        required_width_cm = obj_summary["grip_width_cm"]
-        if required_width_cm is None:
-            required_width_cm = max(obj_summary["dims"][0], obj_summary["dims"][1])
-
-        required_open_cm = required_width_cm + max(0.5, min(2.0, max(0.5, obj_summary["dims"][2] * 0.12)))
-        if summary["max_gap_cm"] < required_open_cm:
-            self.mw.show_toast("Object is too wide for this gripper pair", "warning")
 
     def _has_contact_surface_ui(self):
         return hasattr(self, "surface_target_label")
@@ -1098,79 +1149,66 @@ class GripperPanel(QtWidgets.QWidget):
     def _joint_selection_entries(self):
         robot = self.mw.robot
         entries = []
-        # Track which joints are already covered by a relation entry
-        joints_in_relations = set()
 
-        for master_name in sorted(robot.joint_relations.keys(), key=self._joint_name_sort_key):
-            if master_name not in robot.joints:
-                continue
-
-            master_joint = robot.joints[master_name]
-            for slave_name, ratio in robot.joint_relations.get(master_name, []):
-                slave_joint = robot.joints.get(slave_name)
-                if slave_joint is None:
-                    continue
-
-                # One entry per relation, displayed under the master joint name only.
-                # Both master and slave are tracked so neither appears as a standalone single.
-                members = [master_name, slave_name]
-                joints_in_relations.add(master_name)
-                joints_in_relations.add(slave_name)
-
-                display_name = master_name  # Show only the master joint name in the UI
-                tooltip = (
-                    f"{master_name}: {master_joint.parent_link.name} -> {master_joint.child_link.name} | "
-                    f"{slave_name}: {slave_joint.parent_link.name} -> {slave_joint.child_link.name} | "
-                    f"ratio: {ratio}"
-                )
-                entries.append(
-                    {
-                        "primary_name": master_name,
-                        "members": members,
-                        "display_name": display_name,
-                        "tooltip": tooltip,
-                    }
-                )
-
-        single_index = 1
         for joint_name in sorted(robot.joints.keys(), key=self._joint_name_sort_key):
-            if joint_name in joints_in_relations:
-                continue
-
             joint = robot.joints[joint_name]
-            if not joint.is_gripper:
-                continue
-
+            tooltip = (
+                f"{joint_name}: {joint.parent_link.name} -> {joint.child_link.name}"
+            )
             entries.append(
                 {
                     "primary_name": joint_name,
                     "members": [joint_name],
-                    "display_name": f"Single {single_index}: {joint_name}",
-                    "tooltip": (
-                        f"{joint_name}: {joint.parent_link.name} -> {joint.child_link.name}"
-                    ),
+                    "display_name": joint_name,
+                    "tooltip": tooltip,
                 }
             )
-            single_index += 1
 
         return entries
 
     def on_make_robo(self):
-        self.mw.log("🚀 FINALIZING ASSEMBLY: Building Robot Kinematic Tree...")
+        self.mw.log("?? FINALIZING ASSEMBLY: Building Robot Kinematic Tree...")
         success = self.mw.make_robot()
         if success:
             self.refresh_joints()
             if hasattr(self.mw, 'experiment_tab'):
                 self.mw.experiment_tab.update_display()
-            self.mw.show_toast("Assembly Finalized", "success")
+
+            # Auto-attach the live point to the finalized TCP result.
+            self._auto_lock_live_point()
+
+            self.mw.show_toast("Assembly Finalized ? | Live Point Locked to TCP", "success")
         else:
             self.mw.show_toast("Assembly Failed", "error")
+
+    def _auto_lock_live_point(self):
+        """Lock the live point to the finalized rigid TCP so it moves with the robot."""
+        try:
+            if hasattr(self.mw, '_configure_default_tcp') and self.mw._configure_default_tcp():
+                tcp_name = getattr(self.mw, 'custom_tcp_name', None)
+                sim_panel = getattr(self.mw, 'simulation_tab', None)
+                if sim_panel is not None:
+                    sim_panel.live_point_locked = False
+                    sim_panel.locked_live_point = None
+
+                self.mw.live_point_locked = False
+                self.mw.locked_live_point = None
+                self.mw.locked_live_point_link_name = tcp_name
+                self.mw.locked_live_point_local = None
+                self.mw.log(f"Live Point locked to rigid TCP frame '{tcp_name}' and will move with the robot.")
+                if hasattr(self.mw, 'update_live_ui'):
+                    self.mw.update_live_ui(render=False)
+                return
+
+            self.mw.log("Could not auto-lock live point: no rigid TCP link was found.")
+        except Exception as e:
+            self.mw.log(f"Could not auto-lock live point: {e}")
 
     def refresh_sliders(self):
         self.refresh_joints()
 
     def refresh_joints(self):
-        """Update the list of available gripper-capable joints."""
+        """Update the list of available joints for Gripper Tool selection."""
         selected_joint_name = self._selected_joint_name()
         self.joints_list.clear()
         self.mark_gripper_check.setText("Mark as Gripper")
@@ -1191,9 +1229,1142 @@ class GripperPanel(QtWidgets.QWidget):
             self.on_joint_selected(selected_item)
         else:
             self.refresh_contact_surface_ui()
-            self._refresh_compute_ui()
+
+    def _selected_gripper_joint_names(self):
+        selected_items = self.joints_list.selectedItems()
+        return [
+            item.data(QtCore.Qt.UserRole)
+            for item in selected_items
+            if item.data(QtCore.Qt.UserRole)
+        ]
+
+    def _has_valid_gripper_tool_selection(self):
+        selected_tool = self.tool_combo.currentText().strip()
+        selected_status = self.tool_selection_status.text().strip()
+        return selected_tool == "Gripper Tool" and selected_status.startswith("Tool selected:")
+
+    def _refresh_gripper_save_state(self):
+        selected_names = self._selected_gripper_joint_names()
+        has_valid_tool = self._has_valid_gripper_tool_selection()
+        has_required_jaw_count = len(selected_names) >= 2
+        has_one_face_per_joint = all(
+            isinstance(self._gripper_face_selection_data.get(name), dict)
+            and self._gripper_face_selection_data.get(name)
+            for name in selected_names
+        )
+        has_alignment_face = isinstance(self._gripper_alignment_face_data, dict)
+        can_save = (
+            has_valid_tool
+            and has_required_jaw_count
+            and has_one_face_per_joint
+            and has_alignment_face
+        )
+        self.gripper_save_btn.setEnabled(can_save)
+        self._refresh_tool_save_state()
+
+    def _refresh_tool_save_state(self):
+        selected_tool = self.tool_combo.currentText().strip()
+        tool_key = selected_tool.lower()
+        save_btn = getattr(self, "tool_save_btn", None)
+        if save_btn is None:
+            return
+
+        if self._gripper_confirmation_mode or not selected_tool:
+            save_btn.setVisible(False)
+            save_btn.setEnabled(False)
+            return
+
+        save_btn.setVisible(True)
+        if tool_key == "gripper tool":
+            save_btn.setEnabled(self.gripper_save_btn.isEnabled())
+        elif tool_key == "welding tool":
+            save_btn.setEnabled(self.weld_face_name.text().strip().lower() not in ("", "nil"))
+        elif tool_key == "painting tool":
+            paint_face = self.paint_face_status.text().strip().lower()
+            save_btn.setEnabled("nil" not in paint_face)
+        else:
+            save_btn.setEnabled(False)
+
+    def _set_gripper_confirmation_mode(self, enabled):
+        """Show a compact confirmation view after Save, or restore the editable form."""
+        self._gripper_confirmation_mode = bool(enabled)
+        for widget_name in ("selection_group", "control_group", "welding_group", "painting_group"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(not enabled)
+        if hasattr(self, "end_effector_summary_group"):
+            self.end_effector_summary_group.setVisible(enabled)
+        if hasattr(self, "make_robo_btn"):
+            self.make_robo_btn.setVisible(enabled)
+        if hasattr(self, "tool_save_btn"):
+            self.tool_save_btn.setVisible(not enabled and bool(self.tool_combo.currentText().strip()))
+
+    def on_delete_end_effector(self):
+        """Clear the active tool and return to end-effector selection mode."""
+        payload = getattr(self.mw, "end_effector_tool_config", None)
+        tool_type = ""
+        if isinstance(payload, dict):
+            tool_type = str(payload.get("EndEffector", {}).get("ToolType", "")).strip()
+        if not tool_type:
+            tool_type = self.tool_combo.currentText().strip()
+
+        tool_key = tool_type.lower()
+        config_attribute = {
+            "gripper tool": "gripper_tool_config",
+            "welding tool": "welding_tool_config",
+            "painting tool": "paint_tool_config",
+        }.get(tool_key)
+        if config_attribute:
+            setattr(self.mw, config_attribute, None)
+        self.mw.end_effector_tool_config = None
+
+        if tool_key == "gripper tool" and isinstance(payload, dict):
+            jaws = payload.get("EndEffector", {}).get("Jaws", [])
+            jaw_names = {
+                str(jaw.get("JointID"))
+                for jaw in jaws
+                if isinstance(jaw, dict) and jaw.get("JointID")
+            }
+            for joint_name in jaw_names:
+                joint = self.mw.robot.joints.get(joint_name)
+                if joint is not None:
+                    joint.is_gripper = False
+            self.mw.active_gripper_joint_names = []
+            self.mw.active_gripper_joint_name = None
+
+        tcp_names = {
+            getattr(self.mw, "custom_tcp_name", None),
+            getattr(self.mw, "locked_live_point_link_name", None),
+        }
+        for tcp_name in tcp_names:
+            if tcp_name and tcp_name in self.mw.robot.links:
+                tcp_link = self.mw.robot.links[tcp_name]
+                tcp_link.custom_tcp_offset = None
+                tcp_link.custom_tcp_rpy_deg = [0.0, 0.0, 0.0]
+                tcp_link.auto_tcp_offset = None
+
+        self.mw.custom_tcp_name = None
+        self.mw.locked_live_point_link_name = None
+        self.mw.locked_live_point_local = None
+        self.mw.live_point_locked = False
+        self.mw.locked_live_point = None
+        self.mw.robot_finalized = False
+
+        sim_panel = getattr(self.mw, "simulation_tab", None)
+        if sim_panel is not None:
+            sim_panel.live_point_locked = False
+            sim_panel.locked_live_point = None
+
+        self._gripper_tool_selected = False
+        self._gripper_face_selection_queue = []
+        self._pending_gripper_contact_joint_name = None
+        self._gripper_face_selection_data = {}
+        self._gripper_selection_joint_names = []
+        self._gripper_live_point_world = None
+        self._gripper_joint_endpoints = {}
+        self._gripper_alignment_face_data = None
+        self.gripper_alignment_btn.setEnabled(False)
+        self.gripper_alignment_status.setText("Gripping face and Live Point: not selected")
+        self.tool_selection_status.setText("No tool selected")
+        self._update_end_effector_summary(tool_name=None, jaw_count=None, saved=False)
+        self._set_gripper_confirmation_mode(False)
+        for widget_name in ("selection_group", "control_group", "welding_group", "painting_group"):
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.setVisible(False)
+        self.tool_save_btn.setVisible(False)
+        self.make_robo_btn.setVisible(False)
+
+        canvas = getattr(self.mw, "canvas", None)
+        if canvas is not None:
+            if hasattr(canvas, "clear_live_point_marker"):
+                canvas.clear_live_point_marker()
+            if hasattr(canvas, "clear_live_tcp_marker"):
+                canvas.clear_live_tcp_marker()
+
+        joint_tab = getattr(self.mw, "joint_tab", None)
+        if joint_tab is not None:
+            if hasattr(joint_tab, "refresh_joints_history"):
+                joint_tab.refresh_joints_history()
+            if hasattr(joint_tab, "refresh_links"):
+                joint_tab.refresh_links()
+
+        if hasattr(self.mw, "update_live_ui"):
+            self.mw.update_live_ui(render=False)
+        self.mw.log(f"End-effector deleted: {tool_type or 'saved tool'}.")
+        self.mw.show_toast("End-effector removed. Select a new tool.", "success")
+
+    def _build_end_effector_payload(self):
+        selected_names = self._selected_gripper_joint_names()
+        endpoint_angles = self._calculate_gripper_endpoint_angles(selected_names)
+        jaws = []
+        for joint_name in selected_names:
+            face_info = self._gripper_face_selection_data.get(joint_name)
+            if not isinstance(face_info, dict):
+                continue
+            jaws.append({
+                "JointID": joint_name,
+                "FaceID": face_info.get("link_name", ""),
+                "FaceCenter": np.asarray(face_info.get("local_center", [0.0, 0.0, 0.0]), dtype=float).tolist(),
+                "FaceNormal": np.asarray(face_info.get("local_normal", [0.0, 0.0, 1.0]), dtype=float).tolist(),
+                "FaceCenterWorld": np.asarray(face_info.get("world_center", [0.0, 0.0, 0.0]), dtype=float).tolist(),
+                "FaceNormalWorld": np.asarray(face_info.get("world_normal", [0.0, 0.0, 1.0]), dtype=float).tolist(),
+                "FaceCenterLocal": np.asarray(face_info.get("local_center", [0.0, 0.0, 0.0]), dtype=float).tolist(),
+                "FaceNormalLocal": np.asarray(face_info.get("local_normal", [0.0, 0.0, 1.0]), dtype=float).tolist(),
+                "ClosedAngle": float(endpoint_angles.get(joint_name, {}).get("closed", self.gripper_min_input.value())),
+                "OpenAngle": float(endpoint_angles.get(joint_name, {}).get("open", self.gripper_max_input.value())),
+            })
+
+        alignment_face = None
+        if isinstance(self._gripper_alignment_face_data, dict):
+            alignment_face = {
+                "LinkID": self._gripper_alignment_face_data.get("link_name", ""),
+                "TCPLink": self._gripper_alignment_face_data.get("tcp_link_name", ""),
+                "FaceCenterTCPLocal": np.asarray(
+                    self._gripper_alignment_face_data.get("tcp_local_center", [0.0, 0.0, 0.0]),
+                    dtype=float,
+                ).tolist(),
+                "FaceNormalTCPLocal": np.asarray(
+                    self._gripper_alignment_face_data.get("tcp_local_normal", [0.0, 0.0, 1.0]),
+                    dtype=float,
+                ).tolist(),
+                "FaceCenterLinkLocal": np.asarray(
+                    self._gripper_alignment_face_data.get("link_local_center", [0.0, 0.0, 0.0]),
+                    dtype=float,
+                ).tolist(),
+                "FaceNormalLinkLocal": np.asarray(
+                    self._gripper_alignment_face_data.get("link_local_normal", [0.0, 0.0, 1.0]),
+                    dtype=float,
+                ).tolist(),
+            }
+
+        return {
+            "EndEffector": {
+                "ToolType": self.tool_combo.currentText().strip(),
+                "LivePoint": np.asarray(self._gripper_live_point_world, dtype=float).tolist() if self._gripper_live_point_world is not None else None,
+                "TCPLink": getattr(self.mw, "custom_tcp_name", None),
+                "MinOpening": int(self.gripper_min_input.value()),
+                "MaxOpening": int(self.gripper_max_input.value()),
+                "JawCount": len(jaws),
+                "Jaws": jaws,
+                "BaseAlignmentFace": alignment_face,
+            }
+        }
+
+    def restore_saved_gripper_config(self, payload):
+        """Restore the gripper summary and editable data from a project payload."""
+        if not isinstance(payload, dict):
+            return
+        definition = payload.get("EndEffector", payload)
+        if str(definition.get("ToolType", "")).strip().lower() != "gripper tool":
+            return
+
+        jaw_names = [
+            str(jaw.get("JointID"))
+            for jaw in definition.get("Jaws", [])
+            if isinstance(jaw, dict) and jaw.get("JointID") in self.mw.robot.joints
+        ]
+        self._gripper_selection_joint_names = jaw_names
+        self._set_active_gripper_context(jaw_names)
+        self._gripper_face_selection_data = {}
+        self._gripper_joint_endpoints = {}
+        for jaw in definition.get("Jaws", []):
+            if not isinstance(jaw, dict):
+                continue
+            joint_name = str(jaw.get("JointID", ""))
+            joint = self.mw.robot.joints.get(joint_name)
+            if joint is None or joint.child_link is None:
+                continue
+            local_center = np.asarray(
+                jaw.get("FaceCenterLocal", jaw.get("FaceCenter", [0.0, 0.0, 0.0])),
+                dtype=float,
+            )
+            local_normal = np.asarray(
+                jaw.get("FaceNormalLocal", jaw.get("FaceNormal", [0.0, 0.0, 1.0])),
+                dtype=float,
+            )
+            child_world = np.asarray(joint.child_link.t_world, dtype=float)
+            self._gripper_face_selection_data[joint_name] = {
+                "link_name": jaw.get("FaceID", joint.child_link.name),
+                "surface_name": "Saved Contact Face",
+                "local_center": local_center,
+                "local_normal": local_normal,
+                "world_center": (child_world @ np.append(local_center, 1.0))[:3],
+                "world_normal": child_world[:3, :3] @ local_normal,
+            }
+            self._gripper_joint_endpoints[joint_name] = {
+                "closed": float(jaw.get("ClosedAngle", definition.get("MinOpening", 0.0))),
+                "open": float(jaw.get("OpenAngle", definition.get("MaxOpening", 90.0))),
+            }
+
+        alignment = definition.get("BaseAlignmentFace")
+        self._gripper_alignment_face_data = None
+        if isinstance(alignment, dict):
+            tcp_name = alignment.get("TCPLink") or definition.get("TCPLink")
+            tcp_link = self.mw.robot.links.get(tcp_name)
+            local_center = np.asarray(alignment.get("FaceCenterTCPLocal", [0.0, 0.0, 0.0]), dtype=float)
+            local_normal = np.asarray(alignment.get("FaceNormalTCPLocal", [0.0, 0.0, 1.0]), dtype=float)
+            jaw_centers = [
+                np.asarray(face_info["world_center"], dtype=float).reshape(3)
+                for face_info in self._gripper_face_selection_data.values()
+                if isinstance(face_info, dict) and face_info.get("world_center") is not None
+            ]
+            midpoint_world = np.mean(np.asarray(jaw_centers, dtype=float), axis=0) if jaw_centers else None
+            if tcp_link is not None:
+                tcp_pose = np.asarray(self.mw.robot.get_tcp_world_pose(tcp_link), dtype=float)
+                if midpoint_world is not None:
+                    link_local_center = (
+                        np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+                        @ np.append(midpoint_world, 1.0)
+                    )[:3]
+                    self.mw.robot.set_tcp_transform(
+                        tcp_link.name, position=link_local_center
+                    )
+                    self.mw.robot.ensure_tcp_transform(tcp_link)
+                    self.mw.custom_tcp_name = tcp_link.name
+                    world_center = midpoint_world
+                    saved_link_center = link_local_center
+                    tcp_local_center = np.zeros(3, dtype=float)
+                else:
+                    link_local_center = alignment.get("FaceCenterLinkLocal")
+                    if link_local_center is not None:
+                        try:
+                            link_local_center = np.asarray(
+                                link_local_center, dtype=float
+                            ).reshape(3)
+                            self.mw.robot.set_tcp_transform(
+                                tcp_link.name, position=link_local_center
+                            )
+                            self.mw.robot.ensure_tcp_transform(tcp_link)
+                            self.mw.custom_tcp_name = tcp_link.name
+                        except (TypeError, ValueError):
+                            link_local_center = None
+                    world_center = (tcp_pose @ np.append(local_center, 1.0))[:3]
+                    if link_local_center is None:
+                        saved_link_center = getattr(
+                            tcp_link, "custom_tcp_offset", None
+                        )
+                        if saved_link_center is None:
+                            saved_link_center = np.zeros(3, dtype=float)
+                    else:
+                        saved_link_center = link_local_center
+                    tcp_local_center = local_center
+                tcp_local_rotation = np.asarray(
+                    self.mw.robot.get_tcp_local_transform(tcp_link), dtype=float
+                )[:3, :3]
+                self._gripper_alignment_face_data = {
+                    "link_name": alignment.get("LinkID", ""),
+                    "tcp_link_name": tcp_link.name,
+                    "tcp_local_center": tcp_local_center,
+                    "tcp_local_normal": local_normal,
+                    "link_local_center": np.asarray(
+                        saved_link_center, dtype=float
+                    ),
+                    "link_local_normal": np.asarray(
+                        alignment.get(
+                            "FaceNormalLinkLocal",
+                            tcp_local_rotation @ local_normal,
+                        ),
+                        dtype=float,
+                    ),
+                    "world_center": world_center,
+                    "world_normal": tcp_pose[:3, :3] @ local_normal,
+                }
+                self._gripper_live_point_world = world_center.copy()
+                self.gripper_live_point_preview.setText(
+                    f"Live Point Preview: ({world_center[0]:.2f}, "
+                    f"{world_center[1]:.2f}, {world_center[2]:.2f})"
+                )
+
+        self.gripper_min_input.blockSignals(True)
+        self.gripper_max_input.blockSignals(True)
+        self.gripper_min_input.setValue(int(definition.get("MinOpening", 0)))
+        self.gripper_max_input.setValue(int(definition.get("MaxOpening", 90)))
+        self.gripper_min_input.blockSignals(False)
+        self.gripper_max_input.blockSignals(False)
+        self.tool_combo.setCurrentText("Gripper Tool")
+        self.tool_selection_status.setText("Tool selected: Gripper Tool")
+        self._gripper_tool_selected = True
+        self.gripper_alignment_btn.setEnabled(bool(jaw_names))
+        if self._gripper_alignment_face_data is not None:
+            self.gripper_alignment_status.setText(
+                f"Gripping face / Live Point: {alignment.get('LinkID', 'saved face')}"
+            )
+            self.gripper_alignment_status.setStyleSheet("color: #388e3c; font-size: 12px;")
+        self._update_end_effector_summary(
+            tool_name="Gripper Tool",
+            jaw_count=len(jaw_names),
+            saved=True,
+        )
+        self._set_gripper_confirmation_mode(True)
+
+    def on_select_tool_ok(self):
+        selected_tool = self.tool_combo.currentText()
+        self.tool_selection_status.setText(f"Tool selected: {selected_tool}")
+        self._gripper_tool_selected = selected_tool == "Gripper Tool"
+        self.mw.log(f"End-effector tool selected: {selected_tool}")
+        self._set_gripper_confirmation_mode(False)
+        # Apply UI changes based on chosen tool
+        try:
+            self._apply_tool_selection(selected_tool)
+        except Exception:
+            pass
+        self._update_end_effector_summary(tool_name=selected_tool, jaw_count=None, saved=False)
+        self._refresh_gripper_save_state()
+        self._refresh_tool_save_state()
+
+    def on_weld_tool_compile(self):
+        tool_name = self.tool_combo.currentText().strip()
+        if not tool_name:
+            self.weld_compile_status.setText("Please enter the welding tool filename first.")
+            self.weld_compile_status.setStyleSheet("color: #d32f2f; font-size: 12px; margin-top: 4px;")
+            return
+
+        self._start_weld_face_picking()
+        self.weld_compile_status.setText(f"Compiled tool: {tool_name}. Click a face in the 3D view to set Live Point.")
+        self.weld_compile_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 4px;")
+        self._refresh_tool_save_state()
+
+    def _start_weld_face_picking(self):
+        tool_name = self.tool_combo.currentText().strip() or "Welding Tool"
+        if hasattr(self.mw.canvas, 'start_face_picking'):
+            self.mw.canvas.start_face_picking(self.on_weld_face_picked, color="red")
+            self.mw.log(f"{tool_name} active. Click a face on the model to assign the Live Point.")
+            self.mw.show_toast("Select a face for the welding tool Live Point", "info")
+
+    def on_weld_face_picked(self, link_name, world_center=None, world_normal=None):
+        self.weld_face_name.setText(link_name or "nil")
+        if world_center is not None:
+            world_center = np.asarray(world_center, dtype=float).reshape(3)
+            self.weld_tcp_x.setText(f"{world_center[0]:.2f}")
+            self.weld_tcp_y.setText(f"{world_center[1]:.2f}")
+            self.weld_tcp_z.setText(f"{world_center[2]:.2f}")
+        else:
+            self.weld_tcp_x.setText("nil")
+            self.weld_tcp_y.setText("nil")
+            self.weld_tcp_z.setText("nil")
+
+        if world_normal is not None:
+            world_normal = np.asarray(world_normal, dtype=float).reshape(3)
+            self.weld_axis_x.setText(f"{world_normal[0]:.2f}")
+            self.weld_axis_y.setText(f"{world_normal[1]:.2f}")
+            self.weld_axis_z.setText(f"{world_normal[2]:.2f}")
+        else:
+            self.weld_axis_x.setText("nil")
+            self.weld_axis_y.setText("nil")
+            self.weld_axis_z.setText("nil")
+
+        if link_name and hasattr(self.mw, 'robot') and link_name in self.mw.robot.links:
+            picked_link = self.mw.robot.links[link_name]
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                tcp_link = self.mw._resolve_rigid_tcp_link(picked_link)
+            else:
+                tcp_link = picked_link
+
+            if world_center is None:
+                try:
+                    world_center = np.asarray(tcp_link.t_world[:3, 3], dtype=float)
+                except Exception:
+                    world_center = None
+
+            if world_center is not None:
+                try:
+                    inv_world = np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+                    local_point = (inv_world @ np.append(world_center, 1.0))[:3]
+                except Exception:
+                    local_point = np.asarray(world_center, dtype=float).reshape(3)
+
+                self.mw.custom_tcp_name = tcp_link.name
+                self.mw.robot.set_tcp_transform(tcp_link.name, position=local_point)
+                self.mw.robot.ensure_tcp_transform(tcp_link)
+                self.mw.log(f"Welding tool live point bound to TCP link '{tcp_link.name}'.")
+                self.mw.show_toast(f"Live Point set to {tcp_link.name}", "success")
+                if hasattr(self.mw, 'update_live_ui'):
+                    self.mw.update_live_ui()
+            else:
+                self.mw.log("Welding tool face selected, but could not resolve a valid TCP world point.")
+                self.mw.show_toast("Live Point assignment incomplete", "warning")
+        else:
+            self.mw.log(f"Welding tool face selected for '{link_name}', but link was not found in the robot.")
+            self.mw.show_toast("Selected face is not part of the robot model", "error")
+
+        self.mw.log(f"Welding tool live point assigned to face on '{link_name}'.")
+        self._refresh_tool_save_state()
+
+    def on_paint_tool_compile(self):
+        selected_face = self.paint_face_status.text().replace("Nozzle face selected:", "").strip()
+        if not selected_face or selected_face.lower() == "nil":
+            self.paint_tool_status.setText("Please pick a nozzle face before compiling.")
+            self.paint_tool_status.setStyleSheet("color: #d32f2f; font-size: 12px; margin-top: 4px;")
+            return
+
+        tool_name = self.tool_combo.currentText().strip() or "Painting Tool"
+        self.paint_tool_status.setText(f"Compiled paint tool: {tool_name}. Nozzle face locked.")
+        self.paint_tool_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 4px;")
+        self.mw.log(f"Paint tool compiled with nozzle face '{selected_face}'.")
+        self.mw.show_toast("Painting nozzle face compiled", "success")
+        self._refresh_tool_save_state()
+
+    def on_paint_pick_nozzle(self):
+        self.paint_tool_status.setText("Pick a nozzle face on the robot model.")
+        self.paint_tool_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 4px;")
+
+        if hasattr(self.mw.canvas, 'start_face_picking'):
+            self.mw.canvas.start_face_picking(
+                self.on_paint_nozzle_face_picked,
+                color="green",
+            )
+            self.mw.log("Painting tool active. Click a face to assign nozzle TCP.")
+            self.mw.show_toast("Select the nozzle face in 3D view", "info")
+
+    def on_paint_nozzle_face_picked(self, link_name, world_center=None, world_normal=None):
+        self.paint_face_status.setText(f"Nozzle face selected: {link_name or 'nil'}")
+        self.paint_tool_status.setText("Painting nozzle face assigned.")
+        self.paint_tool_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 4px;")
+
+        if world_center is not None:
+            world_center = np.asarray(world_center, dtype=float).reshape(3)
+            self.paint_tcp_x.setText(f"{world_center[0]:.2f}")
+            self.paint_tcp_y.setText(f"{world_center[1]:.2f}")
+            self.paint_tcp_z.setText(f"{world_center[2]:.2f}")
+        else:
+            self.paint_tcp_x.setText("nil")
+            self.paint_tcp_y.setText("nil")
+            self.paint_tcp_z.setText("nil")
+
+        if world_normal is not None:
+            world_normal = np.asarray(world_normal, dtype=float).reshape(3)
+            self.paint_dir_x.setText(f"{world_normal[0]:.2f}")
+            self.paint_dir_y.setText(f"{world_normal[1]:.2f}")
+            self.paint_dir_z.setText(f"{world_normal[2]:.2f}")
+        else:
+            self.paint_dir_x.setText("nil")
+            self.paint_dir_y.setText("nil")
+            self.paint_dir_z.setText("nil")
+
+        if link_name and hasattr(self.mw, 'robot') and link_name in self.mw.robot.links:
+            picked_link = self.mw.robot.links[link_name]
+            if hasattr(self.mw, '_resolve_rigid_tcp_link'):
+                tcp_link = self.mw._resolve_rigid_tcp_link(picked_link)
+            else:
+                tcp_link = picked_link
+
+            if world_center is None:
+                try:
+                    world_center = np.asarray(tcp_link.t_world[:3, 3], dtype=float)
+                except Exception:
+                    world_center = None
+
+            if world_normal is not None and world_center is not None:
+                try:
+                    inv_world = np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+                    local_point = (inv_world @ np.append(world_center, 1.0))[:3]
+                except Exception:
+                    local_point = np.asarray(world_center, dtype=float).reshape(3)
+
+                self.mw.custom_tcp_name = tcp_link.name
+                self.mw.robot.set_tcp_transform(tcp_link.name, position=local_point)
+                self.mw.robot.ensure_tcp_transform(tcp_link)
+                self.mw.log(f"Paint tool nozzle TCP set to '{tcp_link.name}'.")
+                self.mw.show_toast(f"Painting TCP set to {tcp_link.name}", "success")
+                if hasattr(self.mw, 'update_live_ui'):
+                    self.mw.update_live_ui()
+        else:
+            self.mw.log(f"Paint nozzle face selected for '{link_name}', but link was not found in the robot.")
+            self.mw.show_toast("Selected nozzle face is not part of the robot model", "error")
+
+        self.mw.log(f"Painting tool nozzle face assigned on '{link_name}'.")
+        self._refresh_tool_save_state()
+
+    def on_tool_save_clicked(self):
+        selected_tool = self.tool_combo.currentText().strip().lower()
+        if selected_tool == "gripper tool":
+            self.on_gripper_save_clicked()
+        elif selected_tool == "welding tool":
+            self.on_weld_tool_save_clicked()
+        elif selected_tool == "painting tool":
+            self.on_paint_tool_save_clicked()
+
+    def _build_weld_tool_payload(self):
+        return {
+            "EndEffector": {
+                "ToolType": "Welding Tool",
+                "ToolName": self.tool_combo.currentText().strip(),
+                "SelectedFace": self.weld_face_name.text().strip(),
+                "LivePoint": [
+                    self.weld_tcp_x.text().strip(),
+                    self.weld_tcp_y.text().strip(),
+                    self.weld_tcp_z.text().strip(),
+                ],
+                "ToolAxis": [
+                    self.weld_axis_x.text().strip(),
+                    self.weld_axis_y.text().strip(),
+                    self.weld_axis_z.text().strip(),
+                ],
+                "DirectionMode": self.weld_dir_combo.currentText().strip(),
+            }
+        }
+
+    def _gripper_tcp_anchor_link(self, joint_names=None):
+        """Return the rigid flange shared by the selected gripper jaws."""
+        anchors = []
+        for joint_name in joint_names or self._gripper_selection_joint_names:
+            joint = self.mw.robot.joints.get(joint_name)
+            if joint is None or joint.child_link is None:
+                continue
+            anchor = joint.parent_link
+            if hasattr(self.mw, "_resolve_rigid_tcp_link"):
+                anchor = self.mw._resolve_rigid_tcp_link(joint.child_link) or anchor
+            if anchor is not None and anchor not in anchors:
+                anchors.append(anchor)
+        if not anchors:
+            return None
+        return max(
+            anchors,
+            key=lambda link: len(self.mw.robot.get_kinematic_chain(link)),
+        )
+
+    def _gripper_alignment_allowed_link_names(self):
+        """Return tool links that may provide the object-base alignment face."""
+        allowed = set()
+        anchor = self._gripper_tcp_anchor_link()
+        if anchor is not None:
+            allowed.add(anchor.name)
+
+        for joint_name in self._gripper_selection_joint_names:
+            joint = self.mw.robot.joints.get(joint_name)
+            if joint is None or joint.child_link is None:
+                continue
+            stack = [joint.child_link]
+            while stack:
+                link = stack.pop()
+                if link.name in allowed:
+                    continue
+                allowed.add(link.name)
+                for child_joint in getattr(link, "child_joints", []):
+                    if child_joint.child_link is not None:
+                        stack.append(child_joint.child_link)
+        return allowed
+
+    def on_select_gripper_alignment_face(self):
+        """Ask the user to choose the gripping face that defines the TCP."""
+        if len(self._gripper_selection_joint_names) < 2:
+            self.gripper_alignment_status.setText(
+                "Compile at least two gripper joints before selecting the alignment face."
+            )
+            self.gripper_alignment_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+        if not hasattr(self.mw, "canvas") or not hasattr(self.mw.canvas, "start_face_picking"):
+            return
+
+        self.gripper_alignment_status.setText(
+            "Click a gripper-tool face. Its normal will align with the object's base; "
+            "the Live Point will stay at the jaw centroid."
+        )
+        self.gripper_alignment_status.setStyleSheet("color: #d97706; font-size: 12px;")
+        self.mw.canvas.start_face_picking(
+            self._on_gripper_alignment_face_selected,
+            color="orange",
+        )
+        self.mw.show_toast("Select the gripping face and Live Point", "info")
+
+    def _on_gripper_alignment_face_selected(self, link_name, world_center=None, world_normal=None):
+        """Store the selected face in the rigid TCP coordinate frame."""
+        if (
+            link_name not in self._gripper_alignment_allowed_link_names()
+            or world_center is None
+            or world_normal is None
+        ):
+            self.gripper_alignment_status.setText(
+                "Select a face belonging to the compiled gripper tool."
+            )
+            self.gripper_alignment_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            self._refresh_gripper_save_state()
+            return
+
+        tcp_link = self._gripper_tcp_anchor_link()
+        if tcp_link is None:
+            self.gripper_alignment_status.setText("The rigid gripper TCP could not be resolved.")
+            self.gripper_alignment_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+
+        world_center = np.asarray(world_center, dtype=float).reshape(3)
+        world_normal = np.asarray(world_normal, dtype=float).reshape(3)
+        normal_length = float(np.linalg.norm(world_normal))
+        if normal_length <= 1e-9:
+            self.gripper_alignment_status.setText("The selected face has no valid normal.")
+            self.gripper_alignment_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+        world_normal /= normal_length
+
+        self._gripper_alignment_face_data = {
+            "link_name": link_name,
+            "tcp_link_name": tcp_link.name,
+            "world_center": world_center,
+            "world_normal": world_normal,
+        }
+        tcp_link = self._bind_gripper_live_point_to_selected_face()
+        if tcp_link is None:
+            self.gripper_alignment_status.setText(
+                "The selected face center could not be assigned as the Live Point."
+            )
+            self.gripper_alignment_status.setStyleSheet(
+                "color: #d32f2f; font-size: 12px;"
+            )
+            return
+        tcp_local_normal = self._gripper_alignment_face_data["tcp_local_normal"]
+        self.gripper_alignment_status.setText(
+            f"Gripping face / alignment normal: {link_name} (TCP {tcp_link.name})"
+        )
+        self.gripper_alignment_status.setStyleSheet("color: #388e3c; font-size: 12px;")
+        self._refresh_gripper_save_state()
+        self.mw.log(
+            f"Gripping face selected on '{link_name}'. Its normal will guide the alignment; "
+            f"the Live Point will be centered between all selected jaw faces."
+        )
+        self.mw.show_toast("Gripping face selected for alignment", "success")
+
+    def _selected_gripper_face_centroid_world(self, joint_names):
+        """Return the world-space centroid of all selected jaw face centers."""
+        face_centers = []
+        for joint_name in joint_names or []:
+            joint = self.mw.robot.joints.get(joint_name)
+            face_info = self._gripper_face_selection_data.get(joint_name)
+            if joint is None or joint.child_link is None or not isinstance(face_info, dict):
+                continue
+
+            local_center = face_info.get("local_center")
+            if local_center is None:
+                continue
+
+            try:
+                local_center = np.asarray(local_center, dtype=float).reshape(3)
+            except (TypeError, ValueError):
+                continue
+
+            face_centers.append(
+                (
+                    np.asarray(joint.child_link.t_world, dtype=float)
+                    @ np.append(local_center, 1.0)
+                )[:3]
+            )
+
+        if not face_centers:
+            return None
+
+        return np.mean(np.asarray(face_centers, dtype=float), axis=0)
+
+    def _mesh_face_centers(self, mesh):
+        """Return face-center points for meshes that expose triangle or cell geometry."""
+        if mesh is None:
+            return None
+
+        try:
+            import trimesh
+            if isinstance(mesh, trimesh.Trimesh):
+                if hasattr(mesh, "triangles_center"):
+                    return np.asarray(mesh.triangles_center, dtype=float)
+                if hasattr(mesh, "faces") and hasattr(mesh, "vertices"):
+                    faces = np.asarray(mesh.faces, dtype=int)
+                    verts = np.asarray(mesh.vertices, dtype=float)
+                    if faces.ndim == 2 and faces.shape[1] >= 3:
+                        return np.mean(verts[faces[:, :3]], axis=1)
+        except Exception:
+            pass
+
+        try:
+            import pyvista as pv
+            if hasattr(mesh, "cell_centers"):
+                centers = mesh.cell_centers().points
+                if centers is not None and len(centers):
+                    return np.asarray(centers, dtype=float)
+        except Exception:
+            pass
+
+        if hasattr(mesh, "faces") and hasattr(mesh, "vertices"):
+            faces = np.asarray(mesh.faces)
+            verts = np.asarray(mesh.vertices, dtype=float)
+            if faces.ndim == 2 and faces.shape[1] >= 3:
+                return np.mean(verts[faces[:, :3]], axis=1)
+            if faces.ndim == 1 and faces.size > 0:
+                face_centers = []
+                idx = 0
+                while idx < faces.size:
+                    count = int(faces[idx])
+                    if count < 3 or idx + count >= faces.size:
+                        break
+                    indices = faces[idx + 1: idx + 1 + count]
+                    face_centers.append(np.mean(verts[indices[:3]], axis=0))
+                    idx += count + 1
+                if face_centers:
+                    return np.asarray(face_centers, dtype=float)
+
+        return None
+
+    def _bind_gripper_live_point_to_selected_face(self):
+        """Bind the jaw-face centroid to the rigid TCP link."""
+        face_data = self._gripper_alignment_face_data
+        if not isinstance(face_data, dict):
+            return None
+
+        tcp_name = face_data.get("tcp_link_name")
+        tcp_link = self.mw.robot.links.get(tcp_name)
+        if tcp_link is None:
+            tcp_link = self._gripper_tcp_anchor_link()
+        world_center = self._selected_gripper_face_centroid_world(
+            self._gripper_selection_joint_names
+        )
+        world_normal = face_data.get("world_normal")
+        if tcp_link is None or world_center is None or world_normal is None:
+            return None
+
+        world_center = np.asarray(world_center, dtype=float).reshape(3)
+        world_normal = np.asarray(world_normal, dtype=float).reshape(3)
+        normal_length = float(np.linalg.norm(world_normal))
+        if normal_length <= 1e-9:
+            return None
+        world_normal /= normal_length
+
+        link_world = np.asarray(tcp_link.t_world, dtype=float)
+        inverse_link_world = np.linalg.inv(link_world)
+        link_local_center = (
+            inverse_link_world @ np.append(world_center, 1.0)
+        )[:3]
+        link_local_normal = link_world[:3, :3].T @ world_normal
+        link_local_normal /= max(float(np.linalg.norm(link_local_normal)), 1e-12)
+
+        self.mw.robot.set_tcp_transform(
+            tcp_link.name, position=link_local_center
+        )
+        self.mw.robot.ensure_tcp_transform(tcp_link)
+        self.mw.custom_tcp_name = tcp_link.name
+
+        tcp_pose = np.asarray(
+            self.mw.robot.get_tcp_world_pose(tcp_link), dtype=float
+        )
+        inverse_tcp = np.linalg.inv(tcp_pose)
+        tcp_local_center = (
+            inverse_tcp @ np.append(world_center, 1.0)
+        )[:3]
+        tcp_local_normal = tcp_pose[:3, :3].T @ world_normal
+        tcp_local_normal /= max(float(np.linalg.norm(tcp_local_normal)), 1e-12)
+
+        face_data.update({
+            "tcp_link_name": tcp_link.name,
+            "world_center": world_center,
+            "world_normal": world_normal,
+            "tcp_local_center": tcp_local_center,
+            "tcp_local_normal": tcp_local_normal,
+            "link_local_center": link_local_center,
+            "link_local_normal": link_local_normal,
+        })
+        self._gripper_live_point_world = world_center.copy()
+        self.gripper_live_point_preview.setText(
+            f"Live Point Preview: ({world_center[0]:.2f}, "
+            f"{world_center[1]:.2f}, {world_center[2]:.2f})"
+        )
+
+        self.mw.live_point_locked = False
+        self.mw.locked_live_point = None
+        self.mw.locked_live_point_link_name = tcp_link.name
+        self.mw.locked_live_point_local = None
+        simulation_panel = getattr(self.mw, "simulation_tab", None)
+        if simulation_panel is not None:
+            simulation_panel.live_point_locked = False
+            simulation_panel.locked_live_point = None
+        if hasattr(self.mw, "update_live_ui"):
+            self.mw.update_live_ui(render=False)
+        return tcp_link
+
+    def _bind_gripper_live_point_to_flange(self, joint_names):
+        """Bind the midpoint between selected jaw faces to the rigid gripper flange."""
+        current_face_centers = []
+        for joint_name in joint_names or []:
+            joint = self.mw.robot.joints.get(joint_name)
+            face_info = self._gripper_face_selection_data.get(joint_name)
+            if joint is None or joint.child_link is None or not isinstance(face_info, dict):
+                continue
+
+            local_center = face_info.get("local_center")
+            if local_center is not None:
+                current_face_centers.append(
+                    (
+                        np.asarray(joint.child_link.t_world, dtype=float)
+                        @ np.append(np.asarray(local_center, dtype=float).reshape(3), 1.0)
+                    )[:3]
+                )
+
+        tcp_link = self._gripper_tcp_anchor_link(joint_names)
+        if tcp_link is None or not current_face_centers:
+            return None
+
+        midpoint_world = np.mean(np.asarray(current_face_centers, dtype=float), axis=0)
+        inverse_tcp_world = np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+        midpoint_local = (inverse_tcp_world @ np.append(midpoint_world, 1.0))[:3]
+
+        self._gripper_live_point_world = midpoint_world
+        self.mw.robot.set_tcp_transform(tcp_link.name, position=midpoint_local)
+        self.mw.robot.ensure_tcp_transform(tcp_link)
+        self.mw.custom_tcp_name = tcp_link.name
+        self.mw.log(
+            f"Gripper TCP bound to '{tcp_link.name}' at the midpoint of {len(current_face_centers)} jaw faces."
+        )
+        return tcp_link
+
+    def _calculate_gripper_endpoint_angles(self, joint_names):
+        """Find a moving closed/open endpoint for every jaw, honoring joint relations."""
+        joint_names = [
+            name for name in dict.fromkeys(joint_names or [])
+            if name in self.mw.robot.joints
+        ]
+        min_angle = float(self.gripper_min_input.value())
+        max_angle = float(self.gripper_max_input.value())
+        if min_angle > max_angle:
+            min_angle, max_angle = max_angle, min_angle
+
+        selected_set = set(joint_names)
+        slave_relations = {}
+        for master_name, slaves in self.mw.robot.joint_relations.items():
+            for slave_name, ratio in slaves:
+                if master_name in selected_set and slave_name in selected_set:
+                    slave_relations[slave_name] = (master_name, float(ratio))
+
+        candidate_angles = {}
+        for name in joint_names:
+            joint = self.mw.robot.joints[name]
+            first = float(np.clip(min_angle, joint.min_limit, joint.max_limit))
+            second = float(np.clip(max_angle, joint.min_limit, joint.max_limit))
+
+            relation = slave_relations.get(name)
+            if relation is not None:
+                master_name, ratio = relation
+                master = self.mw.robot.joints[master_name]
+                master_first = float(np.clip(min_angle, master.min_limit, master.max_limit))
+                master_second = float(np.clip(max_angle, master.min_limit, master.max_limit))
+                first = float(np.clip(master_first * ratio, joint.min_limit, joint.max_limit))
+                second = float(np.clip(master_second * ratio, joint.min_limit, joint.max_limit))
+
+            # A positive UI range must still move a negative-range mirrored jaw.
+            if abs(second - first) < 1e-9 and max_angle > min_angle:
+                mirrored_first = float(np.clip(-min_angle, joint.min_limit, joint.max_limit))
+                mirrored_second = float(np.clip(-max_angle, joint.min_limit, joint.max_limit))
+                if abs(mirrored_second - mirrored_first) > 1e-9:
+                    first, second = mirrored_first, mirrored_second
+                elif joint.max_limit > joint.min_limit:
+                    first = float(joint.min_limit)
+                    second = float(joint.max_limit)
+            candidate_angles[name] = (first, second)
+
+        fallback = {
+            name: {"closed": values[0], "open": values[1]}
+            for name, values in candidate_angles.items()
+        }
+        if len(joint_names) < 2:
+            self._gripper_joint_endpoints = fallback
+            return fallback
+
+        for name in joint_names:
+            face_info = self._gripper_face_selection_data.get(name)
+            joint = self.mw.robot.joints[name]
+            if not isinstance(face_info, dict) or face_info.get("local_center") is None or joint.child_link is None:
+                self._gripper_joint_endpoints = fallback
+                return fallback
+
+        saved_values = {
+            name: float(joint.current_value)
+            for name, joint in self.mw.robot.joints.items()
+        }
+        open_indices = {}
+        try:
+            # Hold every jaw at the midpoint while evaluating one jaw at a time.
+            for name, (first, second) in candidate_angles.items():
+                self.mw.robot.joints[name].current_value = 0.5 * (first + second)
+            self.mw.robot.update_kinematics()
+
+            for name in joint_names:
+                joint = self.mw.robot.joints[name]
+                scores = []
+                for angle in candidate_angles[name]:
+                    joint.current_value = float(angle)
+                    self.mw.robot.update_kinematics()
+
+                    local_center = np.asarray(
+                        self._gripper_face_selection_data[name]["local_center"],
+                        dtype=float,
+                    ).reshape(3)
+                    jaw_center = (
+                        np.asarray(joint.child_link.t_world, dtype=float)
+                        @ np.append(local_center, 1.0)
+                    )[:3]
+                    other_centers = []
+                    for other_name in joint_names:
+                        if other_name == name:
+                            continue
+                        other_joint = self.mw.robot.joints[other_name]
+                        other_local = np.asarray(
+                            self._gripper_face_selection_data[other_name]["local_center"],
+                            dtype=float,
+                        ).reshape(3)
+                        other_centers.append(
+                            (
+                                np.asarray(other_joint.child_link.t_world, dtype=float)
+                                @ np.append(other_local, 1.0)
+                            )[:3]
+                        )
+                    scores.append(float(np.mean([
+                        np.linalg.norm(jaw_center - other_center)
+                        for other_center in other_centers
+                    ])))
+
+                open_indices[name] = 1 if scores[1] >= scores[0] else 0
+                first, second = candidate_angles[name]
+                joint.current_value = 0.5 * (first + second)
+                self.mw.robot.update_kinematics()
+        finally:
+            for name, value in saved_values.items():
+                joint = self.mw.robot.joints.get(name)
+                if joint is not None:
+                    joint.current_value = value
+            self.mw.robot.update_kinematics()
+
+        if len(open_indices) != len(joint_names):
+            self._gripper_joint_endpoints = fallback
+            return fallback
+
+        # Relation slaves must follow the same normalized phase as their master.
+        for slave_name, (master_name, _ratio) in slave_relations.items():
+            if master_name in open_indices:
+                open_indices[slave_name] = open_indices[master_name]
+
+        endpoints = {}
+        for name, values in candidate_angles.items():
+            open_index = open_indices[name]
+            endpoints[name] = {
+                "closed": float(values[1 - open_index]),
+                "open": float(values[open_index]),
+            }
+        self._gripper_joint_endpoints = endpoints
+        return endpoints
+
+    def _manual_gripper_joint_names(self):
+        if self._gripper_selection_joint_names:
+            return list(self._gripper_selection_joint_names)
+        selected = [
+            item.data(QtCore.Qt.UserRole)
+            for item in self.joints_list.selectedItems()
+            if item.data(QtCore.Qt.UserRole)
+        ]
+        current = self.joints_list.currentItem()
+        if not selected and current is not None and current.data(QtCore.Qt.UserRole):
+            selected = [current.data(QtCore.Qt.UserRole)]
+        return list(dict.fromkeys(selected))
+
+    def _apply_gripper_opening_percent(self, percent, recalculate=False):
+        """Apply one normalized slider value to every configured jaw."""
+        joint_names = self._manual_gripper_joint_names()
+        if not joint_names:
+            return {}
+        if recalculate or any(name not in self._gripper_joint_endpoints for name in joint_names):
+            endpoints = self._calculate_gripper_endpoint_angles(joint_names)
+        else:
+            endpoints = self._gripper_joint_endpoints
+
+        fraction = float(np.clip(percent, 0.0, 100.0)) / 100.0
+        targets = {}
+        for name in joint_names:
+            bounds = endpoints.get(name)
+            if not bounds:
+                continue
+            target = bounds["closed"] + fraction * (bounds["open"] - bounds["closed"])
+            targets[name] = float(target)
+            self._apply_uniform_gripper_opening(name, target)
+
+        self.mw.robot.update_kinematics()
+        if hasattr(self.mw, "canvas") and hasattr(self.mw.canvas, "update_transforms"):
+            self.mw.canvas.update_transforms(self.mw.robot)
+        return targets
+
+    def on_weld_tool_save_clicked(self):
+        tool_name = self.tool_combo.currentText().strip()
+        face_name = self.weld_face_name.text().strip()
+        if not tool_name:
+            self.weld_compile_status.setText("Please enter the welding tool filename first.")
+            self.weld_compile_status.setStyleSheet("color: #d32f2f; font-size: 12px; margin-top: 4px;")
+            return
+        if not face_name or face_name.lower() == "nil":
+            self.weld_compile_status.setText("Please pick a face in the 3D view before saving.")
+            self.weld_compile_status.setStyleSheet("color: #d32f2f; font-size: 12px; margin-top: 4px;")
+            return
+
+        payload = self._build_weld_tool_payload()
+        self.mw.welding_tool_config = payload
+        self.mw.end_effector_tool_config = payload
+        self.tool_selection_status.setText("Tool selected: Welding Tool")
+        self._gripper_tool_selected = False
+        self._set_gripper_confirmation_mode(True)
+        self._update_end_effector_summary(
+            tool_name="Welding Tool",
+            detail_text=f"selected face: {face_name}",
+            saved=True,
+        )
+        self.weld_compile_status.setText("Welding tool selected and saved successfully.")
+        self.weld_compile_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 4px;")
+        self.mw.log(f"Welding Tool saved: {payload}")
+        self.mw.show_toast("Welding tool saved", "success")
+        self._refresh_tool_save_state()
+
+    def _build_paint_tool_payload(self):
+        return {
+            "EndEffector": {
+                "ToolType": "Painting Tool",
+                "ToolName": self.tool_combo.currentText().strip(),
+                "NozzleFace": self.paint_face_status.text().replace("Nozzle face selected:", "").strip(),
+                "TCP": [
+                    self.paint_tcp_x.text().strip(),
+                    self.paint_tcp_y.text().strip(),
+                    self.paint_tcp_z.text().strip(),
+                ],
+                "Direction": [
+                    self.paint_dir_x.text().strip(),
+                    self.paint_dir_y.text().strip(),
+                    self.paint_dir_z.text().strip(),
+                ],
+            }
+        }
+
+    def on_paint_tool_save_clicked(self):
+        tool_name = self.tool_combo.currentText().strip()
+        face_text = self.paint_face_status.text().strip().lower()
+        selected_face = self.paint_face_status.text().replace("Nozzle face selected:", "").strip()
+        if not tool_name:
+            self.paint_tool_status.setText("Select the painting tool before saving.")
+            self.paint_tool_status.setStyleSheet("color: #d32f2f; font-size: 12px; margin-top: 4px;")
+            return
+        if "nil" in face_text:
+            self.paint_tool_status.setText("Please pick a nozzle face before saving.")
+            self.paint_tool_status.setStyleSheet("color: #d32f2f; font-size: 12px; margin-top: 4px;")
+            return
+
+        payload = self._build_paint_tool_payload()
+        self.mw.paint_tool_config = payload
+        self.mw.end_effector_tool_config = payload
+        self.tool_selection_status.setText("Tool selected: Painting Tool")
+        self._gripper_tool_selected = False
+        self._set_gripper_confirmation_mode(True)
+        self._update_end_effector_summary(
+            tool_name="Painting Tool",
+            detail_text=f"nozzle face: {selected_face}",
+            saved=True,
+        )
+        self.paint_tool_status.setText("Painting tool selected and saved successfully.")
+        self.paint_tool_status.setStyleSheet("color: #388e3c; font-size: 12px; margin-top: 4px;")
+        self.mw.log(f"Painting Tool saved: {payload}")
+        self.mw.show_toast("Painting tool saved", "success")
+        self._refresh_tool_save_state()
 
     def on_joint_selected(self, item):
+        if item is None:
+            return
         name = item.data(QtCore.Qt.UserRole)
         if not name:
             return
@@ -1241,9 +2412,450 @@ class GripperPanel(QtWidgets.QWidget):
 
         if joint.is_gripper:
             self.ensure_auto_gripping_ready(preferred_joint_name=name, quiet=True, force=False)
+            if hasattr(joint, 'contact_face_selection') and isinstance(joint.contact_face_selection, dict):
+                pass
         else:
             self.refresh_contact_surface_ui(name)
-        self._refresh_compute_ui()
+
+    def on_joint_list_selection_changed(self):
+        selected_items = self.joints_list.selectedItems()
+        if not selected_items:
+            self.gripper_face_status.setText(
+                "Select the jaw joints and press Compile. Contact faces are detected automatically."
+            )
+            return
+
+        selected_names = [item.data(QtCore.Qt.UserRole) for item in selected_items if item.data(QtCore.Qt.UserRole)]
+        self.gripper_face_status.setText(
+            f"Selected gripper joints: {', '.join(selected_names)}. Compile to create a gripper group."
+        )
+
+    def _refresh_face_selection_table(self):
+        self.face_selection_table.setRowCount(0)
+        for joint_name in self._gripper_selection_joint_names:
+            face_info = self._gripper_face_selection_data.get(joint_name)
+            row = self.face_selection_table.rowCount()
+            self.face_selection_table.insertRow(row)
+            self.face_selection_table.setItem(row, 0, QtWidgets.QTableWidgetItem(str(joint_name)))
+            if isinstance(face_info, dict):
+                face_text = f"{face_info.get('link_name', '')} - {face_info.get('surface_name', 'Auto Contact')}"
+            else:
+                face_text = "Not detected"
+
+            face_cell = QtWidgets.QWidget()
+            face_layout = QtWidgets.QHBoxLayout(face_cell)
+            face_layout.setContentsMargins(6, 2, 4, 2)
+            face_layout.setSpacing(6)
+            face_label = QtWidgets.QLabel(face_text)
+            face_label.setToolTip(face_text)
+            face_label.setStyleSheet("color: #424242; font-size: 11px;")
+            face_layout.addWidget(face_label, 1)
+
+            select_button = QtWidgets.QPushButton("Select Face")
+            select_button.setObjectName(
+                f"select_gripper_contact_face_{joint_name}"
+            )
+            select_button.setToolTip(
+                f"Select the contact face for {joint_name} that will touch the object."
+            )
+            select_button.setFixedSize(82, 27)
+            select_button.setCursor(QtCore.Qt.PointingHandCursor)
+            select_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #1976d2;
+                    color: white;
+                    border: none;
+                    border-radius: 4px;
+                    font-size: 10px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #1565c0; }
+                QPushButton:pressed { background-color: #0d47a1; }
+            """)
+            select_button.clicked.connect(
+                lambda _checked=False, name=joint_name:
+                self._start_gripper_contact_face_selection(name)
+            )
+            face_layout.addWidget(select_button)
+            self.face_selection_table.setCellWidget(row, 1, face_cell)
+        self._refresh_gripper_save_state()
+
+    def _start_gripper_contact_face_selection(self, joint_name):
+        """Start one manual contact-face pick for a specific gripper joint."""
+        joint = self.mw.robot.joints.get(joint_name)
+        if (
+            joint is None
+            or joint.child_link is None
+            or joint_name not in self._gripper_selection_joint_names
+        ):
+            return
+        if not hasattr(self.mw, "canvas") or not hasattr(
+            self.mw.canvas, "start_face_picking"
+        ):
+            return
+
+        self._pending_gripper_contact_joint_name = joint_name
+        self.gripper_face_status.setText(
+            f"Select the contact face on '{joint.child_link.name}' for {joint_name}. "
+            "Choose the surface that will touch the object."
+        )
+        self.gripper_face_status.setStyleSheet(
+            "color: #d97706; font-size: 12px;"
+        )
+        self.mw.canvas.start_face_picking(
+            self._on_gripper_face_selected,
+            color="cyan",
+        )
+        self.mw.show_toast(
+            f"Select the object-contact face for {joint_name}", "info"
+        )
+
+    def _gripper_joint_world_center(self, joint_name):
+        joint = self.mw.robot.joints.get(joint_name)
+        link = joint.child_link if joint is not None else None
+        mesh = getattr(link, "mesh", None) if link is not None else None
+        if link is None:
+            return None
+
+        # Prefer the actual stored contact surface center when it exists.
+        # The mesh bounding-box center can be far from the jaw's true grip point
+        # for curved or offset grippers, which shifts the live point.
+        for attr_name in (
+            "contact_surface_center_local",
+            "gripping_surface_center_local",
+            "paired_gripping_surface_center_local",
+        ):
+            local_center = getattr(joint, attr_name, None)
+            if local_center is None:
+                continue
+            try:
+                local_center = np.asarray(local_center, dtype=float).reshape(3)
+            except (TypeError, ValueError):
+                continue
+            return (np.asarray(link.t_world, dtype=float) @ np.append(local_center, 1.0))[:3]
+
+        if mesh is None:
+            return None
+        face_centers = self._mesh_face_centers(mesh)
+        if face_centers is not None and len(face_centers):
+            local_center = np.mean(np.asarray(face_centers, dtype=float), axis=0)
+        else:
+            bounds = np.asarray(mesh.bounds, dtype=float)
+            if bounds.shape != (2, 3):
+                return None
+            local_center = np.mean(bounds, axis=0)
+        return (np.asarray(link.t_world, dtype=float) @ np.append(local_center, 1.0))[:3]
+
+    def _auto_detect_gripper_contact_faces(self, joint_names):
+        """Choose the surface of each selected jaw that points into the jaw group."""
+        jaw_centers = {
+            name: self._gripper_joint_world_center(name)
+            for name in joint_names
+        }
+        valid_centers = [center for center in jaw_centers.values() if center is not None]
+        if len(valid_centers) < 2:
+            return {}, list(joint_names)
+        group_center = np.mean(np.asarray(valid_centers, dtype=float), axis=0)
+
+        detected = {}
+        failed = []
+        for joint_name in joint_names:
+            jaw_center = jaw_centers.get(joint_name)
+            joint = self.mw.robot.joints.get(joint_name)
+            candidates = self._get_surface_candidates(joint_name)
+            direct_child_name = getattr(getattr(joint, "child_link", None), "name", None)
+            direct_candidates = [
+                candidate for candidate in candidates
+                if candidate.get("link_name") == direct_child_name
+            ]
+            if direct_candidates:
+                candidates = direct_candidates
+            if jaw_center is None or not candidates:
+                failed.append(joint_name)
+                continue
+
+            inward = group_center - jaw_center
+            inward_length = float(np.linalg.norm(inward))
+            if inward_length <= 1e-9:
+                failed.append(joint_name)
+                continue
+            inward /= inward_length
+
+            def candidate_rank(candidate):
+                center = np.asarray(candidate.get("world_center", jaw_center), dtype=float)
+                normal = np.asarray(candidate.get("world_normal", np.zeros(3)), dtype=float)
+                normal_length = float(np.linalg.norm(normal))
+                alignment = float(np.dot(normal / normal_length, inward)) if normal_length > 1e-9 else -1.0
+                inward_projection = float(np.dot(center - jaw_center, inward))
+                return inward_projection, alignment, float(candidate.get("area", 0.0))
+
+            candidate = max(candidates, key=candidate_rank)
+            local_normal = np.asarray(candidate.get("local_normal", [0.0, 0.0, 1.0]), dtype=float).reshape(3)
+            world_normal = np.asarray(candidate.get("world_normal", [0.0, 0.0, 1.0]), dtype=float).reshape(3)
+            if float(np.dot(world_normal, inward)) < 0.0:
+                local_normal = -local_normal
+                world_normal = -world_normal
+
+            detected[joint_name] = {
+                "link_name": candidate.get("link_name", self.mw.robot.joints[joint_name].child_link.name),
+                "surface_name": "Auto Contact Face",
+                "world_center": np.asarray(candidate.get("world_center"), dtype=float).reshape(3),
+                "world_normal": world_normal,
+                "local_center": np.asarray(candidate.get("local_center"), dtype=float).reshape(3),
+                "local_normal": local_normal,
+            }
+        return detected, failed
+
+    def _resolve_gripper_selection_joint(self, link_name):
+        """Return the selected gripper joint that owns the clicked link, if any."""
+        for joint_name in self._gripper_selection_joint_names:
+            joint = self.mw.robot.joints.get(joint_name)
+            if joint is None or joint.child_link is None:
+                continue
+            if getattr(joint.child_link, 'name', None) == link_name:
+                return joint_name
+        return None
+
+    def on_gripper_compile_clicked(self):
+        selected_items = self.joints_list.selectedItems()
+        if not selected_items:
+            self.gripper_face_status.setText("Please select at least two joints before compiling.")
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+
+        selected_names = [item.data(QtCore.Qt.UserRole) for item in selected_items if item.data(QtCore.Qt.UserRole)]
+        if len(selected_names) < 2:
+            self.gripper_face_status.setText("Please select at least two joints to create a gripper group.")
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+
+        for joint_name in selected_names:
+            joint = self.mw.robot.joints.get(joint_name)
+            if joint is not None:
+                joint.is_gripper = True
+        self._set_active_gripper_context(selected_names)
+
+        self._gripper_selection_joint_names = list(selected_names)
+        self._pending_gripper_contact_joint_name = None
+        detected_faces, failed_names = self._auto_detect_gripper_contact_faces(selected_names)
+        self._gripper_face_selection_queue = list(failed_names)
+        self._gripper_face_selection_data = {
+            joint_name: detected_faces.get(joint_name)
+            for joint_name in selected_names
+        }
+        self._gripper_joint_endpoints = {}
+        self._gripper_alignment_face_data = None
+        self.gripper_alignment_btn.setEnabled(True)
+        self.gripper_alignment_status.setText(
+            "Gripping face alignment not selected. The Live Point will be centered between all jaw faces."
+        )
+        self.gripper_alignment_status.setStyleSheet("color: #d97706; font-size: 12px;")
+
+        if not failed_names:
+            face_centers = [detected_faces[name]["world_center"] for name in selected_names]
+            midpoint = np.mean(np.asarray(face_centers, dtype=float), axis=0)
+            self._gripper_live_point_world = midpoint
+            self._calculate_gripper_endpoint_angles(selected_names)
+            self.gripper_live_point_preview.setText(
+                f"Live Point Preview: ({midpoint[0]:.2f}, {midpoint[1]:.2f}, {midpoint[2]:.2f})"
+            )
+
+        self._refresh_face_selection_table()
+        if not failed_names:
+            self.gripper_face_status.setText(
+                f"Compile complete. Contact faces detected automatically for: {', '.join(selected_names)}. "
+                "Now select the gripping face whose center will become the Live Point."
+            )
+            self.gripper_face_status.setStyleSheet("color: #388e3c; font-size: 12px;")
+            self.mw.show_toast("Gripper contact faces detected automatically", "success")
+            self.mw.log(f"Gripper group auto-compiled from joints: {', '.join(selected_names)}")
+            return
+
+        self.gripper_face_status.setText(
+            f"Automatic face detection needs a mesh for: {', '.join(failed_names)}. Click only those jaw faces."
+        )
+        self.gripper_face_status.setStyleSheet("color: #d97706; font-size: 12px;")
+        self.mw.show_toast("Some jaw faces need manual selection", "warning")
+        if hasattr(self.mw, "canvas") and hasattr(self.mw.canvas, 'start_face_picking'):
+            self.mw.canvas.start_face_picking(
+                self._on_gripper_face_selected,
+                color="cyan",
+                keep_active=True,
+            )
+
+    def _on_gripper_face_selected(self, link_name, world_center=None, world_normal=None):
+        if not self._gripper_selection_joint_names:
+            return
+
+        if not link_name or world_center is None or world_normal is None:
+            self.gripper_face_status.setText("Please select a valid face on the jaw surface.")
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+
+        selected = self._pending_gripper_contact_joint_name
+        if selected is not None:
+            pending_joint = self.mw.robot.joints.get(selected)
+            expected_link_name = getattr(
+                getattr(pending_joint, "child_link", None), "name", None
+            )
+            if link_name != expected_link_name:
+                self.gripper_face_status.setText(
+                    f"Select a face on '{expected_link_name}' for {selected}; "
+                    f"'{link_name}' belongs to another component."
+                )
+                self.gripper_face_status.setStyleSheet(
+                    "color: #d32f2f; font-size: 12px;"
+                )
+                return
+        else:
+            selected = self._resolve_gripper_selection_joint(link_name)
+        if selected is None:
+            self.gripper_face_status.setText(
+                f"Clicked face '{link_name}' is not part of the currently selected gripper joints."
+            )
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            return
+
+        joint = self.mw.robot.joints.get(selected)
+        child_link = joint.child_link if joint is not None else None
+        world_center = np.asarray(world_center, dtype=float).reshape(3)
+        world_normal = np.asarray(world_normal, dtype=float).reshape(3)
+        if child_link is None:
+            return
+        inverse_world = np.linalg.inv(np.asarray(child_link.t_world, dtype=float))
+        local_center = (inverse_world @ np.append(world_center, 1.0))[:3]
+        local_normal = inverse_world[:3, :3] @ world_normal
+        normal_length = float(np.linalg.norm(local_normal))
+        if normal_length > 1e-9:
+            local_normal = local_normal / normal_length
+
+        face_entry = {
+            "link_name": link_name,
+            "surface_name": "Manual Contact Face",
+            "world_center": world_center,
+            "world_normal": world_normal,
+            "local_center": local_center,
+            "local_normal": local_normal,
+        }
+        self._gripper_face_selection_data[selected] = face_entry
+        self._pending_gripper_contact_joint_name = None
+        self._refresh_face_selection_table()
+
+        self.gripper_face_status.setText(
+            f"Face assigned for {selected}. One face is now stored for this jaw."
+        )
+        self.gripper_face_status.setStyleSheet("color: #616161; font-size: 12px;")
+
+        if self._gripper_face_selection_data and all(self._gripper_face_selection_data.get(name) for name in self._gripper_selection_joint_names):
+            face_centers = []
+            for joint_name in self._gripper_selection_joint_names:
+                face_info = self._gripper_face_selection_data.get(joint_name)
+                if isinstance(face_info, dict):
+                    face_centers.append(face_info["world_center"])
+            if face_centers:
+                midpoint = np.mean(np.asarray(face_centers, dtype=float), axis=0)
+                self._gripper_live_point_world = midpoint
+                self._calculate_gripper_endpoint_angles(self._gripper_selection_joint_names)
+                self.gripper_live_point_preview.setText(
+                    f"Live Point Preview: ({midpoint[0]:.2f}, {midpoint[1]:.2f}, {midpoint[2]:.2f})"
+                )
+
+    def on_gripper_opening_slider_changed(self):
+        min_val = int(self.gripper_min_input.value())
+        max_val = int(self.gripper_max_input.value())
+        if min_val > max_val:
+            self.gripper_max_input.setValue(min_val)
+            max_val = min_val
+
+        targets = self._apply_gripper_opening_percent(100, recalculate=True)
+
+        self.gripper_opening_label.setText(
+            f"Opening Preview: Min {min_val}, Max {max_val} ({len(targets)} jaws)"
+        )
+
+    def _apply_uniform_gripper_opening(self, joint_name, target_deg):
+        """Apply the same opening angle to one gripper joint and its linked relation chain."""
+        joint = self.mw.robot.joints.get(joint_name)
+        if joint is None:
+            return
+
+        target = float(np.clip(target_deg, joint.min_limit, joint.max_limit))
+        joint.current_value = target
+        self._propagate_relation(joint_name, target)
+
+    def on_gripper_save_clicked(self):
+        if not self._has_valid_gripper_tool_selection():
+            self.gripper_face_status.setText("Please select the Gripper Tool before saving.")
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            self.gripper_save_btn.setEnabled(False)
+            return
+
+        selected_names = self._selected_gripper_joint_names()
+        if len(selected_names) < 2:
+            self.gripper_face_status.setText("A gripper group needs at least two joints.")
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            self.gripper_save_btn.setEnabled(False)
+            return
+
+        if any(not isinstance(self._gripper_face_selection_data.get(name), dict) or not self._gripper_face_selection_data.get(name) for name in selected_names):
+            self.gripper_face_status.setText("Assign exactly one face to every selected gripper joint before saving.")
+            self.gripper_face_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            self.gripper_save_btn.setEnabled(False)
+            return
+
+        if not isinstance(self._gripper_alignment_face_data, dict):
+            self.gripper_alignment_status.setText(
+                "Select one gripping face for alignment; the Live Point will be the jaw centroid."
+            )
+            self.gripper_alignment_status.setStyleSheet("color: #d32f2f; font-size: 12px;")
+            self.gripper_save_btn.setEnabled(False)
+            return
+
+        if self._bind_gripper_live_point_to_selected_face() is None:
+            self.gripper_alignment_status.setText(
+                "The jaw-face centroid could not be saved as the Live Point."
+            )
+            self.gripper_alignment_status.setStyleSheet(
+                "color: #d32f2f; font-size: 12px;"
+            )
+            return
+        payload = self._build_end_effector_payload()
+        self.mw.gripper_tool_config = payload
+        self.mw.end_effector_tool_config = payload
+        self._gripper_tool_selected = True
+        self.tool_combo.setCurrentText("Gripper Tool")
+        self.tool_selection_status.setText("Tool selected: Gripper Tool")
+        self._set_gripper_confirmation_mode(True)
+        jaw_count = int(payload.get("EndEffector", {}).get("JawCount", 0))
+        self._update_end_effector_summary(tool_name="Gripper Tool", jaw_count=jaw_count, saved=True)
+        self.mw.log(f"Gripper Tool saved: {payload}")
+        self.mw.log("Gripper Tool selected and saved.")
+        self.gripper_face_status.setText("Gripper Tool selected and saved successfully.")
+        self.gripper_face_status.setStyleSheet("color: #388e3c; font-size: 12px;")
+        self.mw.show_toast("Gripper Tool configuration saved", "success")
+
+    def _update_end_effector_summary(self, tool_name=None, jaw_count=None, detail_text=None, saved=False):
+        """Refresh the summary card shown under the end-effector tool picker."""
+        if hasattr(self, "end_effector_summary_tool"):
+            if tool_name:
+                display_tool = "gripper" if str(tool_name).strip().lower() == "gripper tool" else str(tool_name).strip().lower()
+                self.end_effector_summary_tool.setText(f"selected tool: {display_tool}")
+            else:
+                self.end_effector_summary_tool.setText("selected tool: -")
+
+        if hasattr(self, "end_effector_summary_detail"):
+            if detail_text:
+                self.end_effector_summary_detail.setText(f"tool info: {detail_text}")
+            elif jaw_count is None:
+                self.end_effector_summary_detail.setText("tool info: -")
+            else:
+                self.end_effector_summary_detail.setText(f"tool info: no of jaws: {int(jaw_count)}")
+
+        if hasattr(self, "end_effector_summary_note"):
+            if saved and tool_name:
+                self.end_effector_summary_note.setText("Saved selection is ready to use in the selected tool mode.")
+            else:
+                self.end_effector_summary_note.setText("Press Save to lock the current tool configuration.")
 
     def on_mark_toggled(self, checked):
         item = self.joints_list.currentItem()
@@ -1286,7 +2898,6 @@ class GripperPanel(QtWidgets.QWidget):
         else:
             if getattr(self.mw, 'active_gripper_joint_name', None) in rel_chain:
                 self._set_active_gripper_context([])
-        self._refresh_compute_ui()
 
     def _surface_priority(self, base_name):
         priority = {
@@ -1428,8 +3039,13 @@ class GripperPanel(QtWidgets.QWidget):
 
     def _build_bbox_surface_candidates(self, link_name, link, link_center_world, assembly_center_world):
         mesh = link.mesh
+        face_centers = self._mesh_face_centers(mesh)
+        if face_centers is not None and len(face_centers):
+            local_center = np.mean(np.asarray(face_centers, dtype=float), axis=0)
+        else:
+            bounds = np.array(mesh.bounds, dtype=float)
+            local_center = (bounds[0] + bounds[1]) / 2.0
         bounds = np.array(mesh.bounds, dtype=float)
-        local_center = (bounds[0] + bounds[1]) / 2.0
         extents = bounds[1] - bounds[0]
         rot = link.t_world[:3, :3]
 
@@ -1680,8 +3296,12 @@ class GripperPanel(QtWidgets.QWidget):
             if link is None or getattr(link, 'mesh', None) is None:
                 continue
 
-            bounds = np.array(link.mesh.bounds, dtype=float)
-            local_center = (bounds[0] + bounds[1]) / 2.0
+            face_centers = self._mesh_face_centers(link.mesh)
+            if face_centers is not None and len(face_centers):
+                local_center = np.mean(np.asarray(face_centers, dtype=float), axis=0)
+            else:
+                bounds = np.array(link.mesh.bounds, dtype=float)
+                local_center = (bounds[0] + bounds[1]) / 2.0
             world_center = (link.t_world @ np.append(local_center, 1.0))[:3]
             link_payloads.append((link_name, link, world_center))
 
@@ -2445,10 +4065,12 @@ class GripperPanel(QtWidgets.QWidget):
             self.mw.log("Select a gripper joint first before choosing a contact surface.")
             self.mw.show_toast("Select a gripper joint first", "warning")
             return
-
-        self.mw.joint_tab.on_select_gripper_surface(
-            joint_id=joint_name,
-            on_surface_picked=self._on_contact_surface_picked
+        self.mw.log(
+            "Contact surface selection via the canvas button has been removed."
+        )
+        self.mw.show_toast(
+            "Select Gripper Surface has been removed",
+            "info",
         )
 
     def _on_contact_surface_picked(self, selection):
@@ -2519,26 +4141,25 @@ class GripperPanel(QtWidgets.QWidget):
 
 
     def on_stroke_changed(self, value):
-        item = self.joints_list.currentItem()
-        if not item:
+        targets = self._apply_gripper_opening_percent(value)
+        if not targets:
             return
 
-        name = item.data(QtCore.Qt.UserRole)
-        joint = self.mw.robot.joints[name]
-        joint_span = joint.max_limit - joint.min_limit
-        target = joint.min_limit if abs(joint_span) < 1e-9 else (
-            joint.min_limit + (value / 100.0) * joint_span
+        state = "Closed" if value <= 0 else "Open" if value >= 100 else "Opening"
+        self.gripper_opening_control_label.setText(
+            f"Gripper Opening (all jaws): {int(value)}% - {state}"
         )
-
-        joint.current_value = target
-        self._propagate_relation(name, target)
 
         # Send to Hardware (Digital Twin Sync)
         if hasattr(self.mw, 'serial_mgr') and self.mw.serial_mgr.is_connected:
             speed = float(getattr(self.mw, 'current_speed', 50))
-            self.mw.serial_mgr.send_command(name, target, speed=speed)
+            for joint_name, target in targets.items():
+                self.mw.serial_mgr.send_command(joint_name, target, speed=speed)
 
-        self.mw.robot.update_kinematics()
-        self.mw.canvas.update_transforms(self.mw.robot)
-        self.refresh_contact_surface_ui(name)
+        self.refresh_contact_surface_ui(next(iter(targets)))
 
+    # ========================================
+    # CONTACT FACE SELECTION HANDLERS
+    # ========================================
+
+    # Contact face support removed from this panel.

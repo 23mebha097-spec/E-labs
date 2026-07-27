@@ -1,11 +1,11 @@
 from PyQt5 import QtWidgets, QtCore, QtGui
 from graphics.canvas import RobotCanvas
 from core.robot import Robot
-from ui.panels.align_panel import AlignPanel
 from ui.panels.joint_panel import JointPanel
 from ui.panels.experiment_panel import ExperimentPanel
 from ui.panels.program_panel import ProgramPanel
 from ui.panels.gripper_panel import GripperPanel
+from ui.panels.simulation_panel import SimulationPanel
 from ui.panels.ik_fk_panel import IKFKPanel
 import os
 import numpy as np
@@ -15,7 +15,7 @@ from core.firmware_gen import generate_esp32_firmware
 
 from ui.mixins.links_mixin import LinksMixin
 from ui.mixins.navigation_mixin import NavigationMixin
-from ui.mixins.project_mixin import ProjectMixin
+from ui.mixins.project_mixin import PROJECT_FILE_FILTER, ProjectMixin
 
 class TypeOnlyDoubleSpinBox(QtWidgets.QDoubleSpinBox):
     def stepBy(self, steps): pass
@@ -455,6 +455,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         self.robot = Robot()
         self.alignment_cache = {} # Cache for storing alignment points: {(parent, child): point}
+        self.rigid_groups = []  # Rigid assembly metadata: [{group_id, anchor, members, joint_names}]
         self.current_speed = 50   # Global speed setting (0-100%)
         self.import_preferences = {
             "last_stl_unit": "mm",
@@ -466,9 +467,14 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.workspace_plane_mode = "inclined"
         self.last_workspace_report = None
         self.last_project_dir = os.getcwd()
-        self.robot_sessions = [{"title": "ToRoTrOn", "project_file_path": None}]
+        self.robot_sessions = [self._default_robot_session("ToRoTrOn", robot=self.robot)]
         self.current_session_index = 0
         self._restoring_robot_session = False
+        self.live_point_locked = False
+        self.locked_live_point = None
+        self.locked_live_point_link_name = None
+        self.locked_live_point_local = None
+        self.robot_finalized = False
         self._init_navigation_mixin()
         self.init_ui()
         self.apply_styles()
@@ -480,9 +486,22 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         # Center the window and fix geometry warnings
         self.center_on_screen()
 
+    def _default_program_template(self):
+        try:
+            program_tab = self.experiment_tab.program_tab
+            lang = getattr(program_tab, "current_lang", "command")
+            template = program_tab.templates.get(lang, "")
+            return template or ""
+        except Exception:
+            return ""
+
     def _current_program_code(self):
         try:
-            return self.experiment_tab.program_tab.code_edit.toPlainText()
+            code = self.experiment_tab.program_tab.code_edit.toPlainText()
+            default = self._default_program_template()
+            if code == default:
+                return ""
+            return code
         except Exception:
             return ""
 
@@ -504,7 +523,9 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         session = self.robot_sessions[self.current_session_index]
         session["robot"] = self.robot
         session["alignment_cache"] = dict(getattr(self, "alignment_cache", {}))
+        session["rigid_groups"] = list(getattr(self, "rigid_groups", []))
         session["current_speed"] = getattr(self, "current_speed", 50)
+        session["robot_finalized"] = getattr(self, "robot_finalized", False)
         session["import_preferences"] = dict(getattr(self, "import_preferences", {}))
         session["program_code"] = self._current_program_code()
         session["home_tcp_coords"] = getattr(
@@ -519,9 +540,27 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         if hasattr(self, "joint_tab"):
             import copy
             session["joint_panel_joints"] = copy.deepcopy(getattr(self.joint_tab, "joints", {}))
-        if hasattr(self, "align_tab"):
-            session["alignment_point"] = None if getattr(self.align_tab, "alignment_point", None) is None else np.array(self.align_tab.alignment_point).copy()
-            session["alignment_normal"] = None if getattr(self.align_tab, "alignment_normal", None) is None else np.array(self.align_tab.alignment_normal).copy()
+        session["alignment_point"] = None
+        session["alignment_normal"] = None
+
+    def _default_robot_session(self, title, robot=None):
+        """Build a fresh session record with the standard per-tab state."""
+        return {
+            "title": title,
+            "robot": robot or Robot(),
+            "project_file_path": None,
+            "alignment_cache": {},
+            "rigid_groups": [],
+            "joint_panel_joints": {},
+            "program_code": "",
+            "current_speed": getattr(self, "current_speed", 50),
+            "robot_finalized": False,
+            "home_tcp_coords": (0.0, 0.0, 0.0),
+            "import_preferences": {
+                "last_stl_unit": "mm",
+                "last_up_axis": "preserve",
+            },
+        }
 
     def _clear_visible_robot_scene(self):
         """Remove visible robot actors and transient assembly overlays before restoring a session."""
@@ -550,7 +589,11 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             self.robot = session.get("robot") or Robot()
             session["robot"] = self.robot
             self.alignment_cache = dict(session.get("alignment_cache", {}))
+            self.rigid_groups = list(session.get("rigid_groups", []))
+            if hasattr(self, "_refresh_rigid_groups_list"):
+                self._refresh_rigid_groups_list()
             self.current_speed = int(session.get("current_speed", 50))
+            self.robot_finalized = bool(session.get("robot_finalized", False))
             self.import_preferences = dict(session.get("import_preferences", {
                 "last_stl_unit": "mm",
                 "last_up_axis": "preserve",
@@ -566,8 +609,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                     self.add_link_item(name)
                 if getattr(link, "mesh", None) is not None:
                     self.canvas.update_link_mesh(name, link.mesh, link.t_world, color=getattr(link, "color", "lightgray"))
-                if getattr(link, "is_base", False):
-                    self.canvas.fixed_actors.add(name)
 
             if hasattr(self, "joint_tab"):
                 import copy
@@ -575,12 +616,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 self.joint_tab.active_joint_control = None
                 self.joint_tab.refresh_joints_history()
                 self.joint_tab.refresh_links()
-            if hasattr(self, "align_tab"):
-                self.align_tab.reset_panel()
-                if session.get("alignment_point") is not None:
-                    self.align_tab.alignment_point = np.array(session["alignment_point"]).copy()
-                if session.get("alignment_normal") is not None:
-                    self.align_tab.alignment_normal = np.array(session["alignment_normal"]).copy()
             if hasattr(self, "gripper_tab"):
                 self.gripper_tab.refresh_joints()
             if hasattr(self, "experiment_tab"):
@@ -608,39 +643,204 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         finally:
             self._restoring_robot_session = False
 
-    def add_robot_session(self):
-        """Create a new independent robot assembly tab without clearing existing sessions."""
-        self._capture_current_robot_session()
-        next_number = len(self.robot_sessions) + 1
-        title = f"Robo {next_number}"
-        self.robot_sessions.append({
-            "title": title,
-            "robot": Robot(),
-            "project_file_path": None,
-            "alignment_cache": {},
-            "joint_panel_joints": {},
-            "program_code": "",
-            "current_speed": getattr(self, "current_speed", 50),
-            "home_tcp_coords": (0.0, 0.0, 0.0),
-            "import_preferences": {
-                "last_stl_unit": "mm",
-                "last_up_axis": "preserve",
-            },
-        })
-        if hasattr(self, "session_tab_bar"):
-            self.session_tab_bar.addTab(title)
-            self.session_tab_bar.setCurrentIndex(len(self.robot_sessions) - 1)
-        else:
-            self.current_session_index = len(self.robot_sessions) - 1
-            self._restore_robot_session(self.current_session_index)
-
+    def _apply_default_robot_session_ui_state(self):
+        """Make the active session match the default startup robot layout and feature availability."""
+        if hasattr(self, "experiment_btn"):
+            self.experiment_btn.setChecked(False)
+        if hasattr(self, "experiment_container"):
+            self.experiment_container.setVisible(False)
         if hasattr(self, "assembly_btn"):
             self.assembly_btn.setChecked(True)
-            self.toggle_assembly_panel()
-        if hasattr(self, "switch_panel"):
-            self.switch_panel(0)
-        self.log(f"Add Robo: created new assembly tab '{title}'.")
+        if hasattr(self, "left_container"):
+            self.left_container.setVisible(True)
+        if hasattr(self, "_set_main_splitter_layout"):
+            self._set_main_splitter_layout(show_assembly=True, show_experiment=False)
+        if hasattr(self, "panel_stack") and getattr(self, "panel_stack", None) is not None:
+            if self.panel_stack.count() > 0 and hasattr(self, "switch_panel"):
+                self.switch_panel(0)
 
+        if hasattr(self, "alignment_cache"):
+            self.alignment_cache = {}
+        if hasattr(self, "rigid_groups"):
+            self.rigid_groups = []
+        if hasattr(self, "live_point_locked"):
+            self.live_point_locked = False
+        if hasattr(self, "locked_live_point"):
+            self.locked_live_point = None
+        if hasattr(self, "locked_live_point_link_name"):
+            self.locked_live_point_link_name = None
+        if hasattr(self, "locked_live_point_local"):
+            self.locked_live_point_local = None
+        if hasattr(self, "robot_finalized"):
+            self.robot_finalized = False
+
+        if hasattr(self, "canvas"):
+            self.canvas.clear_highlights()
+            if hasattr(self.canvas, "fixed_actors"):
+                self.canvas.fixed_actors.clear()
+            if hasattr(self.canvas, "plotter") and self.canvas.plotter is not None:
+                try:
+                    self.canvas.plotter.reset_camera()
+                except Exception:
+                    pass
+                try:
+                    self.canvas.plotter.render()
+                except Exception:
+                    pass
+
+        if hasattr(self, "joint_tab"):
+            try:
+                self.joint_tab.reset_joint_ui()
+            except Exception:
+                pass
+        if hasattr(self, "align_tab"):
+            try:
+                self.align_tab.reset_panel()
+            except Exception:
+                pass
+
+    def _on_new_session_clicked(self):
+        """Public entry point used by the Add Robo UI and tests."""
+        self.add_robot_session()
+
+    def open_saved_robot_session(self):
+        """Choose a saved robot project and open it in a new assembly tab."""
+        file_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Add Saved Robot",
+            self._project_dialog_dir(),
+            PROJECT_FILE_FILTER,
+        )
+        if not file_path:
+            return False
+        return self.add_robot_session(project_file_path=file_path)
+
+    def _discard_failed_robot_session(self, new_index, previous_index):
+        """Remove a temporary Add Robo tab after its project failed to load."""
+        if 0 <= new_index < len(self.robot_sessions):
+            self.robot_sessions.pop(new_index)
+        if hasattr(self, "session_tab_bar") and 0 <= new_index < self.session_tab_bar.count():
+            blocker = QtCore.QSignalBlocker(self.session_tab_bar)
+            try:
+                self.session_tab_bar.removeTab(new_index)
+            finally:
+                del blocker
+
+        self.current_session_index = max(0, min(previous_index, len(self.robot_sessions) - 1))
+        if hasattr(self, "session_tab_bar"):
+            blocker = QtCore.QSignalBlocker(self.session_tab_bar)
+            try:
+                self.session_tab_bar.setCurrentIndex(self.current_session_index)
+            finally:
+                del blocker
+        self._restore_robot_session(self.current_session_index)
+
+    def add_robot_session(self, project_file_path=None):
+        """Create an independent robot tab, optionally loading a saved project into it."""
+        previous_index = self.current_session_index
+        new_index = None
+        try:
+            self._capture_current_robot_session()
+            existing_numbers = []
+            for session in self.robot_sessions:
+                title = str(session.get("title", ""))
+                if title.startswith("Robo "):
+                    try:
+                        existing_numbers.append(int(title.split(" ", 1)[1]))
+                    except Exception:
+                        pass
+            next_number = max(existing_numbers, default=1) + 1
+            title = f"Robo {next_number}"
+            if project_file_path:
+                title = os.path.splitext(os.path.basename(project_file_path))[0] or title
+            new_index = len(self.robot_sessions)
+            new_session = self._default_robot_session(title)
+            new_session["robot_finalized"] = False
+            new_session["project_file_path"] = project_file_path
+            self.robot_sessions.append(new_session)
+
+            if hasattr(self, "session_tab_bar"):
+                blocker = QtCore.QSignalBlocker(self.session_tab_bar)
+                try:
+                    self.session_tab_bar.addTab(title)
+                    self.current_session_index = new_index
+                    self.session_tab_bar.setCurrentIndex(new_index)
+                finally:
+                    del blocker
+                self._restore_robot_session(new_index)
+            else:
+                self.current_session_index = new_index
+                self._restore_robot_session(new_index)
+
+            if project_file_path:
+                loaded = self.load_project_from_path(
+                    project_file_path,
+                    show_dialogs=True,
+                    auto_finalize=True,
+                )
+                if not loaded:
+                    self._discard_failed_robot_session(new_index, previous_index)
+                    self.log(f"Add Robo: failed to open saved project '{project_file_path}'.")
+                    return False
+
+                self.log(f"Add Robo: opened saved robot '{os.path.basename(project_file_path)}'.")
+                if hasattr(self, "show_toast"):
+                    self.show_toast(f"Opened robot '{title}'", "success")
+                return True
+
+            self._apply_default_robot_session_ui_state()
+
+            self.log(f"Add Robo: created new assembly tab '{title}'.")
+            if hasattr(self, "show_toast"):
+                self.show_toast(f"Created new robot session '{title}'", "success")
+            return True
+        except Exception as exc:
+            if new_index is not None and new_index < len(self.robot_sessions):
+                self._discard_failed_robot_session(new_index, previous_index)
+            self.log(f"Add Robo: failed to create assembly tab: {exc}")
+            if hasattr(self, "show_toast"):
+                self.show_toast("Unable to add robot session", "error")
+            return False
+
+    def _on_session_tab_close_requested(self, index):
+        """Handle tab close requests for the session bar, including the last-tab fallback."""
+        if index < 0:
+            return
+        if not hasattr(self, "robot_sessions") or not self.robot_sessions:
+            return
+
+        if len(self.robot_sessions) <= 1:
+            self.robot_sessions[0] = self._default_robot_session("ToRoTrOn")
+            if hasattr(self, "session_tab_bar"):
+                self.session_tab_bar.setTabText(0, "ToRoTrOn")
+            self.current_session_index = 0
+            self._restore_robot_session(0)
+            self.log("Add Robo: reset the last session to a fresh ToRoTrOn tab.")
+            return
+
+        self.delete_robot_session(index)
+
+    def _sync_robot_session_order(self, from_index, to_index):
+        """Keep robot_sessions aligned with a draggable QTabBar."""
+        if from_index == to_index:
+            return
+        if from_index < 0 or to_index < 0:
+            return
+        if from_index >= len(self.robot_sessions) or to_index >= len(self.robot_sessions):
+            return
+
+        session = self.robot_sessions.pop(from_index)
+        self.robot_sessions.insert(to_index, session)
+        if self.current_session_index == from_index:
+            self.current_session_index = to_index
+        elif from_index < self.current_session_index <= to_index:
+            self.current_session_index -= 1
+        elif to_index <= self.current_session_index < from_index:
+            self.current_session_index += 1
+
+    def _on_session_tab_moved(self, from_index, to_index):
+        """Reorder the backing session list when the user drags tabs around."""
+        self._sync_robot_session_order(from_index, to_index)
     def _robot_session_tab_at(self, pos):
         if not hasattr(self, "session_tab_bar"):
             return -1
@@ -699,7 +899,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         reply = QtWidgets.QMessageBox.question(
             self,
             "Delete Robo",
-            f"Delete robot assembly tab '{title}'? This will not delete any saved .trn file.",
+            f"Delete robot assembly tab '{title}'? This will not delete any saved project file.",
             QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
             QtWidgets.QMessageBox.No,
         )
@@ -732,9 +932,13 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         """Persist the previous tab and restore the selected robot assembly tab."""
         if getattr(self, "_restoring_robot_session", False):
             return
-        if index < 0 or index == getattr(self, "current_session_index", -1):
+        if index < 0:
             return
-        self._capture_current_robot_session()
+
+        prev_index = getattr(self, "current_session_index", -1)
+        if prev_index != index and prev_index >= 0 and prev_index < len(self.robot_sessions):
+            self._capture_current_robot_session()
+
         self.current_session_index = index
         self._restore_robot_session(index)
         title = self.robot_sessions[index].get("title", f"Robo {index + 1}")
@@ -781,6 +985,13 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             for master, slaves in getattr(self.robot, "joint_relations", {}).items()
         }
         clone.home_joint_values = dict(getattr(self.robot, "home_joint_values", {}))
+        clone.update_kinematics()
+        return clone
+
+    def _clone_robot_for_session(self):
+        """Create a deep copy of the current robot for a new Add Robo session."""
+        import copy
+        clone = copy.deepcopy(self.robot)
         clone.update_kinematics()
         return clone
 
@@ -895,7 +1106,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.add_robo_btn = QtWidgets.QPushButton("  Add Robo")
         self.add_robo_btn.setIcon(self.style().standardIcon(QtWidgets.QStyle.SP_FileIcon))
         self.add_robo_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.add_robo_btn.setToolTip("Start a new robot assembly")
+        self.add_robo_btn.setToolTip("Create a fresh empty robot assembly")
         self.add_robo_btn.setStyleSheet("""
             QPushButton {
                 background-color: white;
@@ -918,7 +1129,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 border-color: #311b92;
             }
         """)
-        self.add_robo_btn.clicked.connect(self.add_robot_session)
+        self.add_robo_btn.clicked.connect(self._on_new_session_clicked)
         top_layout.addWidget(self.add_robo_btn)
         
         # --- Home TCP Coordinate Panel ---
@@ -1032,7 +1243,10 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.session_tab_bar.setUsesScrollButtons(True)
         self.session_tab_bar.setMinimumHeight(36)
         self.session_tab_bar.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.session_tab_bar.setTabsClosable(True)
         self.session_tab_bar.customContextMenuRequested.connect(self.show_robot_session_menu)
+        self.session_tab_bar.tabMoved.connect(self._on_session_tab_moved)
+        self.session_tab_bar.tabCloseRequested.connect(self._on_session_tab_close_requested)
         self.session_tab_bar.setStyleSheet("""
             QTabBar {
                 background: #ffffff;
@@ -1095,9 +1309,8 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.nav_buttons = []
         nav_items = [
             ("Links", "Manage robot links and components"),
-            ("Align", "Align components together"),
             ("Joint", "Create and control joints"),
-            ("Gripper", "Control and calibrate robotic grippers")
+            ("End-Effector", "Control and calibrate robotic end-effectors"),
         ]
         
         # Ensure panel_stack is initialized before buttons are connected
@@ -1108,12 +1321,15 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.links_tab = QtWidgets.QWidget()
         self.setup_links_tab()
         
-        self.align_tab = AlignPanel(self)
         self.joint_tab = JointPanel(self)
         self.gripper_tab = GripperPanel(self)
+        # Internal task engine used by the Object and Code panels. It is not a
+        # user-facing assembly workspace.
+        self.simulation_tab = SimulationPanel(self)
+        self.simulation_tab.setParent(self)
+        self.simulation_tab.setVisible(False)
         
         self.panel_stack.addWidget(self.links_tab)
-        self.panel_stack.addWidget(self.align_tab)
         self.panel_stack.addWidget(self.joint_tab)
         self.panel_stack.addWidget(self.gripper_tab)
         
@@ -1167,6 +1383,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         # --- CANVAS AREA ---
         self.canvas = RobotCanvas()
+        self.canvas.on_drop_callback = self.sync_link_transform
         
         # Add a floating Isometric View button directly to the canvas
         # We use a white circular button with a 'Home' icon
@@ -1265,31 +1482,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         
         # REMOVED: Simulation Panel moved to sidebar
         
-        # --- Gripper Surface Button (bottom-right of canvas) ---
-        self.gripper_surface_btn = QtWidgets.QPushButton("Select Gripper Surface", self.canvas)
-        self.gripper_surface_btn.setToolTip("Click to select the inner surface of the gripper for contact")
-        self.gripper_surface_btn.setFixedSize(160, 40)
-        self.gripper_surface_btn.setCursor(QtCore.Qt.PointingHandCursor)
-        self.gripper_surface_btn.setStyleSheet("""
-            QPushButton {
-                background-color: white;
-                color: #2e7d32;
-                border: 2px solid #4caf50;
-                border-radius: 8px;
-                font-weight: bold;
-                font-size: 13px;
-                padding: 5px;
-            }
-            QPushButton:hover {
-                background-color: #e8f5e9;
-            }
-            QPushButton:pressed {
-                background-color: #c8e6c9;
-            }
-        """)
-        self.gripper_surface_btn.clicked.connect(self.joint_tab.on_select_gripper_surface)
-        self.gripper_surface_btn.setVisible(False)  # Only visible in Joint Mode
-
         # Initial positions
         # Sidebar handles everything now
         original_resize = self.canvas.resizeEvent
@@ -1298,7 +1490,6 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             self.iso_btn.move(self.canvas.width() - 160, 24)
             self.focus_btn.move(self.canvas.width() - 160, 68)
             self.live_point_btn.move(self.canvas.width() - 204, 68)
-            self.gripper_surface_btn.move(self.canvas.width() - 180, self.canvas.height() - 60)
         
         self.canvas.resizeEvent = patched_resize
         
@@ -1656,7 +1847,35 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
         self.log("Workspace plane and board visualization have been removed from the application.")
         self.show_toast("Workspace plane removed", "info")
 
-    def _get_preferred_tcp_link(self):
+    def _is_gripper_child_link(self, link):
+        if link is None:
+            return False
+        current = link
+        while current is not None:
+            parent_joint = getattr(current, "parent_joint", None)
+            if parent_joint is None:
+                return False
+            if getattr(parent_joint, "is_gripper", False):
+                return True
+            current = getattr(parent_joint, "parent_link", None)
+        return False
+
+    def _resolve_rigid_tcp_link(self, link):
+        """Resolve gripper descendants to the rigid flange/tool link."""
+        if link is None:
+            return None
+        current = link
+        while current is not None:
+            parent_joint = getattr(current, "parent_joint", None)
+            if parent_joint is None:
+                return link
+            parent_link = getattr(parent_joint, "parent_link", None)
+            if getattr(parent_joint, "is_gripper", False):
+                return parent_link if parent_link is not None else link
+            current = parent_link
+        return link
+
+    def _get_preferred_tcp_link(self, include_current=True):
         links = list(self.robot.links.values())
         if not links:
             return None
@@ -1666,30 +1885,42 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 return -1
             return len(self.robot.get_kinematic_chain(link))
 
-        custom_tcp = getattr(self, "custom_tcp_name", None)
-        if custom_tcp and custom_tcp in self.robot.links:
-            return self.robot.links[custom_tcp]
+        committed_tcp = getattr(self, "locked_live_point_link_name", None)
+        if include_current and committed_tcp and committed_tcp in self.robot.links:
+            rigid = self._resolve_rigid_tcp_link(self.robot.links[committed_tcp])
+            if rigid is not None and rigid is not self.robot.base_link:
+                return rigid
 
-        tcp_candidates = [link for link in links if getattr(link, "custom_tcp_offset", None) is not None]
+        custom_tcp = getattr(self, "custom_tcp_name", None)
+        if include_current and custom_tcp and custom_tcp in self.robot.links:
+            rigid = self._resolve_rigid_tcp_link(self.robot.links[custom_tcp])
+            if rigid is not None and rigid is not self.robot.base_link:
+                return rigid
+
+        tcp_candidates = [
+            self._resolve_rigid_tcp_link(link)
+            for link in links
+            if getattr(link, "custom_tcp_offset", None) is not None
+        ]
+        tcp_candidates = [link for link in tcp_candidates if link is not None and link is not self.robot.base_link]
         if tcp_candidates:
             return max(tcp_candidates, key=chain_len)
 
         gripper_anchor_candidates = []
         for joint in self.robot.joints.values():
             if getattr(joint, "is_gripper", False) and joint.parent_link is not None:
-                gripper_anchor_candidates.append(joint.parent_link)
+                gripper_anchor_candidates.append(self._resolve_rigid_tcp_link(joint.parent_link))
+        gripper_anchor_candidates = [link for link in gripper_anchor_candidates if link is not None and link is not self.robot.base_link]
         if gripper_anchor_candidates:
             unique_anchors = list(dict.fromkeys(gripper_anchor_candidates))
             return max(unique_anchors, key=chain_len)
 
-        gripper_candidates = [
-            joint.child_link for joint in self.robot.joints.values()
-            if getattr(joint, "is_gripper", False) and joint.child_link is not None
+        leaf_candidates = [
+            self._resolve_rigid_tcp_link(link)
+            for link in links
+            if link.parent_joint is not None and not link.child_joints
         ]
-        if gripper_candidates:
-            return max(gripper_candidates, key=chain_len)
-
-        leaf_candidates = [link for link in links if link.parent_joint is not None and not link.child_joints]
+        leaf_candidates = [link for link in leaf_candidates if link is not None and link is not self.robot.base_link]
         if leaf_candidates:
             return max(leaf_candidates, key=chain_len)
 
@@ -1699,85 +1930,75 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
 
         return max(links, key=chain_len)
 
-    def _auto_detect_topmost_tcp(self):
-        """
-        Analyses all robot link meshes in their current world positions to find the 
-        absolute highest Z-coordinate. It then sets the Live Point (TCP) to the 
-        centroid of all vertices sharing that maximum height.
-        """
-        import numpy as np
-        
-        max_z = -1e12
-        top_verts_data = [] # List of (world_vertex, link_object)
-        
-        # 1. First pass: Find the global maximum height
-        for link in self.robot.links.values():
-            if link.mesh is None: continue
-            
-            # Get world-transformed vertices
+    def _get_displayed_live_point_world_for_commit(self):
+        """Return the red-dot world position that is visible when Make Robo is pressed."""
+        current_cm = getattr(self, "current_live_point_cm", None)
+        ratio = getattr(getattr(self, "canvas", None), "grid_units_per_cm", None)
+        if current_cm is not None and ratio:
             try:
-                # link.t_world is updated by update_kinematics
-                mat = np.array(link.t_world, dtype=float)
-                verts = np.array(link.mesh.vertices, dtype=float)
-                
-                # Transform to world space: (N, 3) -> (N, 4) -> mat @ verts.T -> (3, N)
-                ones = np.ones((verts.shape[0], 1))
-                verts_homog = np.hstack([verts, ones])
-                world_verts = (mat @ verts_homog.T).T[:, :3]
-                
-                local_max_z = np.max(world_verts[:, 2])
-                if local_max_z > max_z:
-                    max_z = local_max_z
+                point = np.asarray(current_cm, dtype=float).reshape(3) * float(ratio)
+                if np.all(np.isfinite(point)):
+                    return point
             except Exception:
-                continue
-        
-        if max_z < -1e11:
-            return False # No geometry found
-            
-        # 2. Second pass: Collect all vertices at the peak (with small epsilon)
-        epsilon = 0.5 # 0.5 internal units (e.g. 0.05mm if units=mm)
-        for link in self.robot.links.values():
-            if link.mesh is None: continue
-            
-            try:
-                mat = np.array(link.t_world, dtype=float)
-                verts = np.array(link.mesh.vertices, dtype=float)
-                ones = np.ones((verts.shape[0], 1))
-                verts_homog = np.hstack([verts, ones])
-                world_verts = (mat @ verts_homog.T).T[:, :3]
-                
-                # Filter vertices at max height
-                mask = world_verts[:, 2] >= (max_z - epsilon)
-                top_v = world_verts[mask]
-                for v in top_v:
-                    top_verts_data.append((v, link))
-            except Exception:
-                continue
-        
-        if not top_verts_data:
+                pass
+
+        try:
+            tcp_link = self._get_preferred_tcp_link(include_current=True)
+            point = np.asarray(self._get_live_point_world(tcp_link), dtype=float).reshape(3)
+            if np.all(np.isfinite(point)):
+                return point
+        except Exception:
+            pass
+        return None
+
+    def _set_tcp_world_point(self, tcp_link, world_point):
+        """Store a world-space live point as a local TCP offset on the rigid link."""
+        if tcp_link is None or world_point is None:
             return False
-            
-        # 3. Calculate Centroid of the peak
-        top_pts = np.array([item[0] for item in top_verts_data])
-        centroid_world = np.mean(top_pts, axis=0)
-        
-        # 4. Choose the 'best' link to host the TCP 
-        # (The leaf-most link that contributed to the peak)
-        def chain_len(link):
-            return len(self.robot.get_kinematic_chain(link))
-            
-        unique_links = list(set(item[1] for item in top_verts_data))
-        target_link = max(unique_links, key=chain_len)
-        
-        # 5. Convert world centroid to local link coordinates
-        inv_mat = np.linalg.inv(np.array(target_link.t_world, dtype=float))
-        local_centroid = (inv_mat @ np.append(centroid_world, 1))[:3]
-        
-        # 6. Apply TCP transform
-        self.robot.set_tcp_transform(target_link.name, position=local_centroid)
-        self.custom_tcp_name = target_link.name
-        
-        self.log(f"📍 Auto-TCP Rewired: Live Point set to topmost center of '{target_link.name}' at Z={max_z/getattr(self.canvas, 'grid_units_per_cm', 1.0):.2f} cm.")
+        try:
+            world_point = np.asarray(world_point, dtype=float).reshape(3)
+            inv_world = np.linalg.inv(np.asarray(tcp_link.t_world, dtype=float))
+            local_point = (inv_world @ np.append(world_point, 1.0))[:3]
+            self.robot.set_tcp_transform(tcp_link.name, position=local_point)
+            self.robot.ensure_tcp_transform(tcp_link)
+            return True
+        except Exception as exc:
+            self.log(f"Could not bind Live Point to '{getattr(tcp_link, 'name', 'unknown')}': {exc}")
+            return False
+
+    def _configure_default_tcp(self, include_current=True, world_point=None):
+        """Attach the live point to the preferred end-effector link using its local TCP offset."""
+        tcp_link = self._get_preferred_tcp_link(include_current=include_current)
+        if tcp_link is None:
+            return False
+
+        if world_point is not None:
+            self._set_tcp_world_point(tcp_link, world_point)
+        else:
+            self.robot.ensure_tcp_transform(tcp_link)
+        self.custom_tcp_name = tcp_link.name
+        self.log(f"Live Point locked to the TCP frame of '{tcp_link.name}'.")
+        return True
+
+    def _commit_live_point_tcp(self, world_point=None):
+        """Freeze the current TCP link and exact point chosen by Make Robo."""
+        tcp_name = getattr(self, "custom_tcp_name", None)
+        if not tcp_name or tcp_name not in self.robot.links:
+            self.locked_live_point_link_name = None
+            self.locked_live_point_local = None
+            return False
+        tcp_link = self._resolve_rigid_tcp_link(self.robot.links[tcp_name])
+        if tcp_link is None or tcp_link is self.robot.base_link:
+            self.locked_live_point_link_name = None
+            self.locked_live_point_local = None
+            return False
+        if world_point is not None:
+            self._set_tcp_world_point(tcp_link, world_point)
+        else:
+            self.robot.ensure_tcp_transform(tcp_link)
+        self.custom_tcp_name = tcp_link.name
+        self.locked_live_point_link_name = tcp_link.name
+        self.locked_live_point_local = self.robot.get_tcp_local_transform(tcp_link)[:3, 3].copy()
         return True
 
     def make_robot(self):
@@ -1796,21 +2017,31 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             return False
 
         try:
+            self.robot_finalized = False
             # --- KINEMATIC & STRUCTURAL ANALYSIS ---
+            rigid_count = self.robot.rigidize_alignment_cache(getattr(self, "alignment_cache", {}))
+            if rigid_count:
+                self.log(f"Rigid assembly recovered: {rigid_count} aligned component(s) linked with fixed joints.")
             self.robot.update_kinematics()
-            tcp_link = self._get_preferred_tcp_link()
-            has_gripper_tip = bool(
-                tcp_link is not None
-                and any(getattr(joint, "is_gripper", False) for joint in tcp_link.child_joints)
+            live_point_world_to_commit = self._get_displayed_live_point_world_for_commit()
+            current_live_point_name = getattr(self, 'custom_tcp_name', None)
+            current_live_point_link = self.robot.links.get(current_live_point_name) if isinstance(current_live_point_name, str) else None
+            rigid_live_point = self._resolve_rigid_tcp_link(current_live_point_link) if current_live_point_link is not None else None
+            valid_live_point = (
+                rigid_live_point is not None
+                and rigid_live_point is not self.robot.base_link
+                and getattr(rigid_live_point, 'name', None) == current_live_point_name
             )
-            if has_gripper_tip:
-                self._refresh_auto_tcp_offset(tcp_link)
-                self.custom_tcp_name = tcp_link.name
-                self.log(f"Live Point locked to gripper TCP on '{tcp_link.name}'.")
-            elif self._auto_detect_topmost_tcp():
-                self.log("Live Point locked from the current robot top-most point. It will now move with that TCP.")
+            if valid_live_point:
+                self.log(f"Live Point preserved on '{current_live_point_name}'.")
             else:
-                self.log("Could not auto-detect a top-most TCP from the current robot geometry.")
+                if self._configure_default_tcp(include_current=False, world_point=live_point_world_to_commit):
+                    self.log(f"Live Point initialized on rigid TCP frame '{self.custom_tcp_name}'.")
+                else:
+                    self.custom_tcp_name = None
+                    self.log("Live Point could not be initialized on a rigid TCP frame.")
+            if self._commit_live_point_tcp(world_point=live_point_world_to_commit):
+                self.log(f"Live Point committed to '{self.locked_live_point_link_name}' for this finalized robot.")
 
             joint_count = len(self.robot.joints)
             self.log("🔍 ANALYSING ROBOT STRUCTURE...")
@@ -1824,7 +2055,7 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
             
             self.canvas.update_transforms(self.robot)
             self.update_link_colors()
-            self.update_live_ui()
+            self.update_live_ui(force_top_face=False)
 
             if hasattr(self, "joint_tab"):
                 self.joint_tab.refresh_links()
@@ -1849,9 +2080,11 @@ class MainWindow(QtWidgets.QMainWindow, LinksMixin, NavigationMixin, ProjectMixi
                 self.show_toast("Assembly Finalized", "success")
             else:
                 self.log(f"Assembly refreshed with base '{self.robot.base_link.name}', but no joints are defined yet.")
-            
+
+            self.robot_finalized = True
             return True
         except Exception as exc:
+            self.robot_finalized = False
             self.log(f"MAKE ROBO ERROR: {exc}")
             self.show_toast("Unable to finalize assembly", "error")
             return False
@@ -2071,6 +2304,7 @@ if __name__ == "__main__":
     window = MainWindow()
     window.show()
     sys.exit(app.exec_())
+
 
 
 
